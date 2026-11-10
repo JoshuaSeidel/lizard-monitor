@@ -1,0 +1,16 @@
+# Local build of lizard-panel-remote.yaml against this checkout. Same files,
+# same order. For `esphome config` / `esphome compile` before pushing.
+substitutions:
+  device_name: lizard-panel
+  friendly_name: Lizard Panel
+  components_source: components
+  # COMPILE CHECK ONLY. This MAC belongs to no device: it exists so the
+  # panel config can be validated before the controller has been flashed.
+  # The real one goes in lizard-panel-remote.yaml (see there). Do not flash
+  # a build of this file -- it would never find the controller.
+  controller_ble_mac: "00:00:00:00:00:01"
+
+packages:
+  base: !include packages/base.yaml
+  board: !include boards/lafvin-esp32c6-panel.yaml
+  panel: !include packages/panel.yaml

@@ -1,0 +1,29 @@
+# ENCLOSURE PANEL -- LAFVIN ESP32-C6 with the on-board 1.47" LCD.
+# Put THIS in the ESPHome dashboard (as lizard-panel.yaml).
+#
+# Shows the controller (lizard-monitor-remote.yaml) over BLE: top and bottom
+# temperature and humidity coloured by the controller's own thresholds,
+# alarms, lamps, and how fresh the data is. Read-only: every setting lives
+# on the controller's page. Dark at night unless there is an alarm; press
+# the BOOT button to wake it.
+#
+# Everything below packages: is pulled from GitHub main on every build; this
+# wrapper holds only the identity and the controller's BLE MAC.
+substitutions:
+  device_name: lizard-panel
+  friendly_name: Lizard Panel
+  # REQUIRED, and deliberately left unset until you have read it: flash the
+  # controller first, open http://lizard-monitor.local/, and copy "Controller
+  # BLE MAC" (Panel group) here, uncommented. Until then this build FAILS --
+  # on purpose: a wrong MAC compiles and then silently never connects.
+  # controller_ble_mac: "XX:XX:XX:XX:XX:XX"
+
+packages:
+  lizard_monitor:
+    url: https://github.com/JoshuaSeidel/lizard-monitor
+    ref: main
+    files:
+      - packages/base.yaml
+      - boards/lafvin-esp32c6-panel.yaml
+      - packages/panel.yaml
+    refresh: 0s

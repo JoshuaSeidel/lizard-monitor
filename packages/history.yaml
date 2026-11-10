@@ -1,0 +1,104 @@
+# 24 h and 30 day history, kept on the controller in flash
+# (components/enclosure_history), drawn at http://<device>/charts.
+#
+# With no Home Assistant there is no other record. What a chart shows lives
+# in flash, survives reboot and power cuts (at most the last half hour is
+# lost to a cut), and a gap -- device off, sensor faulted, no clock -- is
+# drawn as a gap, never filled in.
+#
+# Lamps are charted as "% of the slot on": a 5-minute point at 100 means
+# the lamp was on throughout, 40 means on for 2 of the 5 minutes.
+external_components:
+  - source: ${components_source}
+    components: [enclosure_history]
+    refresh: 0s
+
+sensor:
+  - platform: template
+    id: led_on_pct
+    internal: true
+    update_interval: never
+    lambda: 'return id(led_relay).state ? 100.0f : 0.0f;'
+  - platform: template
+    id: uvb_on_pct
+    internal: true
+    update_interval: never
+    lambda: 'return id(uvb_relay).state ? 100.0f : 0.0f;'
+  - platform: template
+    id: heat_relay_pct
+    internal: true
+    update_interval: never
+    lambda: 'return id(heat_lamp_relay).state ? 100.0f : 0.0f;'
+
+# Refresh the lamp states just before each history sample.
+interval:
+  - interval: 30s
+    startup_delay: 25s
+    then:
+      - component.update: led_on_pct
+      - component.update: uvb_on_pct
+      - component.update: heat_relay_pct
+
+enclosure_history:
+  id: history
+  time_id: sntp_time
+  update_interval: 30s
+  series:
+    - name: top
+      sensor: top_temp
+      scale: 100
+      label: Top
+      chart: Temperature
+      unit_of_measurement: "°F"
+    - name: bottom
+      sensor: bottom_temp
+      scale: 100
+      label: Bottom
+      chart: Temperature
+      unit_of_measurement: "°F"
+    - name: toprh
+      sensor: top_rh
+      scale: 10
+      label: Top
+      chart: Humidity
+      unit_of_measurement: "%"
+    - name: botrh
+      sensor: bottom_rh
+      scale: 10
+      label: Bottom
+      chart: Humidity
+      unit_of_measurement: "%"
+    - name: heat
+      sensor: heat_output_pct
+      scale: 1
+      label: Heat output
+      chart: Lamps
+      unit_of_measurement: "%"
+    - name: heatrly
+      sensor: heat_relay_pct
+      scale: 1
+      label: Heat bulb on
+      chart: Lamps
+      unit_of_measurement: "%"
+    - name: led
+      sensor: led_on_pct
+      scale: 1
+      label: Day light on
+      chart: Lamps
+      unit_of_measurement: "%"
+    - name: uvb
+      sensor: uvb_on_pct
+      scale: 1
+      label: UVB on
+      chart: Lamps
+      unit_of_measurement: "%"
+
+text_sensor:
+  - platform: template
+    name: "Charts"
+    icon: "mdi:chart-line"
+    update_interval: 300s
+    lambda: 'return {"http://${device_name}.local/charts"};'
+    web_server:
+      sorting_group_id: grp_status
+      sorting_weight: 90

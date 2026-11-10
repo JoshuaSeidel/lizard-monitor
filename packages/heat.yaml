@@ -1,0 +1,335 @@
+# Heat bulb: a gated PI loop on the TOP sensor, on the device.
+#
+# HEAT KILLS FASTER THAN COLD. A crested gecko tolerates the low 60s and
+# dies in sustained mid-80s, so every failure here turns the bulb OFF:
+#
+#   allowed = Mode != Off
+#             && top sensor fresh                (components/sht_guard)
+#             && top below Heat Cutoff           (latched, see below)
+#             && (Mode == On  ||  clock set && inside the Day Light window)
+#
+# Not allowed -> output 0 at once, and the integrator is reset (anti-windup:
+# a night of "wanting heat" must not be dumped into the morning).
+#
+# HARD CUTOFF. At or above Heat Cutoff the bulb is forced off in every mode,
+# Manual On included, and stays off until the top has fallen Cutoff
+# Hysteresis below it.
+#
+# THE OUTPUT is components/time_proportioning, whose on-time equals the
+# commanded level times elapsed time. The bulb EMITS LIGHT, so each switch is
+# a visible flicker: the cycle is long (30 min, 10 min minimum on and off by
+# default), giving about two switches an hour at mid power. Heat Lamp Output
+# is the commanded level; Heat Lamp is the relay contact.
+#
+# "Heat Lamp Status" says, in one read, why the bulb is doing what it does.
+substitutions:
+  day_target_f: "76.0"
+  heat_cutoff_f: "80.0"
+  cutoff_hysteresis_f: "1.0"
+  heat_gain_pct_per_f: "25"
+  heat_integral_min: "60"
+  heat_period_min: "30"
+  heat_min_on_min: "10"
+  heat_min_off_min: "10"
+
+globals:
+  - id: heat_i
+    type: float
+    restore_value: false
+    initial_value: '0.0f'
+  - id: heat_level
+    type: float
+    restore_value: false
+    initial_value: '0.0f'
+  - id: heat_cut
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # 0 heating, 1 at target, 2 night, 3 cutoff, 4 sensor fault, 5 no clock,
+  # 6 manual off, 7 manual on. Sent to the panel (packages/ble_link.yaml).
+  - id: heat_code
+    type: int
+    restore_value: false
+    initial_value: '4'
+  # When the relay last opened / closed, millis(). 0 = not since boot.
+  - id: heat_off_since_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: heat_on_since_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+number:
+  - platform: template
+    name: "Day Target"
+    id: day_target_n
+    icon: "mdi:thermometer-auto"
+    unit_of_measurement: "°F"
+    min_value: 68
+    max_value: 82
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${day_target_f}
+    web_server:
+      sorting_group_id: grp_heat
+      sorting_weight: 10
+  - platform: template
+    name: "Heat Cutoff"
+    id: heat_cutoff_n
+    icon: "mdi:thermometer-off"
+    unit_of_measurement: "°F"
+    min_value: 72
+    max_value: 86
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${heat_cutoff_f}
+    web_server:
+      sorting_group_id: grp_heat
+      sorting_weight: 11
+  - platform: template
+    name: "Cutoff Hysteresis"
+    id: cutoff_hyst_n
+    icon: "mdi:arrow-collapse-down"
+    unit_of_measurement: "°F"
+    min_value: 0.2
+    max_value: 5
+    step: 0.1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${cutoff_hysteresis_f}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_heat
+      sorting_weight: 12
+  # Proportional gain: output percent per degF below target. 25 %/degF means
+  # 4 degF below target asks for full power from the P term alone.
+  - platform: template
+    name: "Heat Gain"
+    id: heat_gain_n
+    icon: "mdi:tune-variant"
+    unit_of_measurement: "%/°F"
+    min_value: 1
+    max_value: 200
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${heat_gain_pct_per_f}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_heat
+      sorting_weight: 20
+  - platform: template
+    name: "Heat Integral Time"
+    id: heat_ti_n
+    icon: "mdi:sigma"
+    unit_of_measurement: "min"
+    min_value: 5
+    max_value: 600
+    step: 5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${heat_integral_min}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_heat
+      sorting_weight: 21
+  - platform: template
+    name: "Heat Lamp Cycle Period"
+    id: heat_period_n
+    icon: "mdi:sine-wave"
+    unit_of_measurement: "min"
+    min_value: 5
+    max_value: 120
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${heat_period_min}
+    entity_category: config
+    on_value:
+      - script.execute: apply_heat_timing
+    web_server:
+      sorting_group_id: grp_heat
+      sorting_weight: 30
+  - platform: template
+    name: "Heat Lamp Minimum On"
+    id: heat_min_on_n
+    icon: "mdi:timer-play-outline"
+    unit_of_measurement: "min"
+    min_value: 1
+    max_value: 60
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${heat_min_on_min}
+    entity_category: config
+    on_value:
+      - script.execute: apply_heat_timing
+    web_server:
+      sorting_group_id: grp_heat
+      sorting_weight: 31
+  - platform: template
+    name: "Heat Lamp Minimum Off"
+    id: heat_min_off_n
+    icon: "mdi:timer-pause-outline"
+    unit_of_measurement: "min"
+    min_value: 1
+    max_value: 60
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${heat_min_off_min}
+    entity_category: config
+    on_value:
+      - script.execute: apply_heat_timing
+    web_server:
+      sorting_group_id: grp_heat
+      sorting_weight: 32
+
+binary_sensor:
+  # Published by the board's time_proportioning state_change_action: the
+  # relay contact itself, not the demand.
+  - platform: template
+    name: "Heat Lamp"
+    id: heat_lamp_relay
+    icon: "mdi:lightbulb-on"
+    device_class: heat
+    on_press:
+      - lambda: 'id(heat_on_since_ms) = millis();'
+    on_release:
+      - lambda: 'id(heat_off_since_ms) = millis();'
+    web_server:
+      sorting_group_id: grp_lamps
+      sorting_weight: 30
+
+sensor:
+  - platform: template
+    name: "Heat Lamp Output"
+    id: heat_output_pct
+    icon: "mdi:percent"
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: 'return id(heat_level) * 100.0f;'
+    web_server:
+      sorting_group_id: grp_lamps
+      sorting_weight: 32
+
+text_sensor:
+  - platform: template
+    name: "Heat Lamp Status"
+    id: heat_status
+    icon: "mdi:information-outline"
+    update_interval: never
+    web_server:
+      sorting_group_id: grp_status
+      sorting_weight: 60
+
+script:
+  - id: apply_heat_timing
+    then:
+      - lambda: |-
+          const auto ms = [](float minutes, float dflt) {
+            return (uint32_t) ((std::isnan(minutes) ? dflt : minutes) * 60000.0f);
+          };
+          id(heat_lamp_output).set_period(ms(id(heat_period_n).state, ${heat_period_min}));
+          id(heat_lamp_output).set_min_on_time(ms(id(heat_min_on_n).state, ${heat_min_on_min}));
+          id(heat_lamp_output).set_min_off_time(ms(id(heat_min_off_n).state, ${heat_min_off_min}));
+          ESP_LOGI("heat", "Cycle %.0f min, minimum on %.0f min, minimum off %.0f min",
+                   id(heat_period_n).state, id(heat_min_on_n).state, id(heat_min_off_n).state);
+
+  # One step of the loop. Every 10 s, and at once on a mode change.
+  - id: heat_step
+    mode: queued
+    then:
+      - lambda: |-
+          static uint32_t last_ms = 0;
+          const uint32_t now = millis();
+          float dt = last_ms == 0 ? 10.0f : (now - last_ms) / 1000.0f;
+          if (dt > 60.0f) dt = 60.0f;
+          last_ms = now;
+
+          const int mode = id(heat_mode).active_index().value_or(0);  // 0 Auto, 1 On, 2 Off
+          const bool fresh = id(top_guard).is_fresh();
+          const float top = id(top_temp).state;
+          const float cutoff = id(heat_cutoff_n).state;
+          const float target = id(day_target_n).state;
+
+          // Cutoff latch, evaluated whenever there is a reading.
+          if (fresh) {
+            if (top >= cutoff) {
+              if (!id(heat_cut)) ESP_LOGW("heat", "Top %.1f °F at/above cutoff %.1f °F: heat bulb forced off", top, cutoff);
+              id(heat_cut) = true;
+            } else if (top < cutoff - id(cutoff_hyst_n).state) {
+              id(heat_cut) = false;
+            }
+          }
+
+          int code;
+          float level = 0.0f;
+          if (mode == 2)                       code = 6;
+          else if (!fresh)                     code = 4;
+          else if (id(heat_cut))               code = 3;
+          else if (mode == 1)                  { code = 7; level = 1.0f; }
+          else if (!id(clock_ok))              code = 5;
+          else if (!id(led_window))            code = 2;
+          else {
+            // PI toward the target, conditional integration for anti-windup.
+            const float kp = id(heat_gain_n).state / 100.0f;
+            const float ti_s = id(heat_ti_n).state * 60.0f;
+            const float err = target - top;
+            const float p = kp * err;
+            float i = id(heat_i) + kp * err * dt / ti_s;
+            if (i < 0.0f) i = 0.0f;
+            if (i > 1.0f) i = 1.0f;
+            const float u_try = p + i;
+            if (!((u_try > 1.0f && err > 0.0f) || (u_try < 0.0f && err < 0.0f)))
+              id(heat_i) = i;
+            level = p + id(heat_i);
+            if (level < 0.0f) level = 0.0f;
+            if (level > 1.0f) level = 1.0f;
+            code = level > 0.005f ? 0 : 1;
+          }
+          if (code != 0 && code != 1) id(heat_i) = 0.0f;
+
+          id(heat_level) = level;
+          id(heat_lamp_output).set_level(level);
+
+          char buf[64];
+          switch (code) {
+            case 0: snprintf(buf, sizeof(buf), "heating %.0f%% (top %.1f, target %.1f °F)", level * 100.0f, top, target); break;
+            case 1: snprintf(buf, sizeof(buf), "at target (top %.1f, target %.1f °F)", top, target); break;
+            case 2: snprintf(buf, sizeof(buf), "off: night (outside day window)"); break;
+            case 3: snprintf(buf, sizeof(buf), "OFF: at cutoff (top %.1f, cutoff %.1f °F)", top, cutoff); break;
+            case 4: snprintf(buf, sizeof(buf), "OFF: top sensor fault"); break;
+            case 5: snprintf(buf, sizeof(buf), "OFF: clock not set"); break;
+            case 6: snprintf(buf, sizeof(buf), "off: manual Off"); break;
+            default: snprintf(buf, sizeof(buf), "manual On 100%% (top %.1f °F)", top); break;
+          }
+          if (code != id(heat_code)) ESP_LOGI("heat", "%s", buf);
+          id(heat_code) = code;
+          if (id(heat_status).state != buf) id(heat_status).publish_state(buf);
+
+esphome:
+  on_boot:
+    priority: 200
+    then:
+      - script.execute: apply_heat_timing
+
+interval:
+  - interval: 10s
+    startup_delay: 5s
+    then:
+      - script.execute: heat_step

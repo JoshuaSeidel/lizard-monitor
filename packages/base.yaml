@@ -1,0 +1,211 @@
+# Board-independent plumbing shared by the controller and the panel:
+# identity, network, clock, web page, OTA and the diagnostics every build
+# wants. No pins here -- anything that names a GPIO belongs in boards/.
+#
+# STANDALONE. There is no Home Assistant and no MQTT broker in this project.
+# Everything the enclosure needs runs on the controller and is shown on its
+# own web page (and on the panel). There is deliberately no mqtt: and no
+# api: block -- with no broker to reach, ESPHome's MQTT client would reboot
+# the controller every 15 minutes (tank-monitor packages/standalone.yaml).
+substitutions:
+  # Overridden by each wrapper. device_name is LOAD-BEARING: mDNS host, the
+  # fallback AP name and the web page address all derive from it.
+  device_name: lizard-monitor
+  friendly_name: Lizard Monitor
+  # Where external components come from. The remote wrappers build from
+  # GitHub main; the local-*.yaml wrappers override this with the checkout's
+  # components/ directory so a change compiles before it is pushed.
+  components_source: github://JoshuaSeidel/lizard-monitor@main
+  # Wipe the board's stored settings FROM THE YAML (components/nvs_wipe).
+  # The first boot of a chip that has not run this generation erases
+  # everything it stored -- settings, history, saved Wi-Fi -- and restarts
+  # on the defaults. The LAFVIN C6 ran tank-monitor before; this is how it
+  # sheds that NVS. To wipe again later, put a higher number in the
+  # WRAPPER's substitutions and reflash. Same number = ordinary update.
+  wipe_generation: "1"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+external_components:
+  - source: ${components_source}
+    components: [crash_report, nvs_wipe]
+    # The ref is a moving branch; the default 1d cache would silently build
+    # yesterday's code.
+    refresh: 0s
+
+nvs_wipe:
+  generation: ${wipe_generation}
+
+logger:
+  level: INFO
+
+# SNTP, not Home Assistant. The XIAO has no RTC: if the internet is down at
+# boot the clock stays unknown, and the controller turns every lamp off and
+# raises "clock not set" (packages/photoperiod.yaml). A DS3231 is the fix if
+# that ever matters.
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: !secret timezone
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Wi-Fi going down must not take the enclosure down with it. The default
+  # reboots after 15 minutes without Wi-Fi; on a controller that restarts
+  # the lamps' schedule state and (with no internet to come back to) loses
+  # the clock. Control never needs Wi-Fi, and the panel talks over BLE.
+  reboot_timeout: 0s
+  # Fallback AP so the device is recoverable if Wi-Fi changes: join it and
+  # the captive portal sets new credentials, no reflash needed.
+  ap:
+    ssid: "${device_name} setup"
+    password: !secret lizard_monitor_ap_password
+
+captive_portal:
+
+# ESPHome OTA for when you are on the same network as the build machine, and
+# web_server OTA so a .bin built anywhere can be uploaded on the device page.
+ota:
+  - platform: esphome
+    password: !secret lizard_monitor_ota_password
+  - platform: web_server
+
+# Stock web_server v3: it renders every entity, so nothing added later can go
+# missing from the page (the trap tank_webui's hand-kept JS map fell into).
+# Works with no internet and no Home Assistant. Groups order the page; each
+# entity names its group with web_server: sorting_group_id.
+web_server:
+  port: 80
+  version: 3
+  log: true
+  sorting_groups:
+    - id: grp_status
+      name: "Status"
+      sorting_weight: 10
+    - id: grp_alarms
+      name: "Alarms"
+      sorting_weight: 20
+    - id: grp_lamps
+      name: "Lamps"
+      sorting_weight: 30
+    - id: grp_heat
+      name: "Heat Lamp Control"
+      sorting_weight: 40
+    - id: grp_schedule
+      name: "Photoperiod"
+      sorting_weight: 50
+    - id: grp_alarm_settings
+      name: "Alarm Thresholds"
+      sorting_weight: 60
+    - id: grp_calibration
+      name: "Sensor Calibration"
+      sorting_weight: 70
+    - id: grp_maintenance
+      name: "Maintenance"
+      sorting_weight: 80
+    - id: grp_panel
+      name: "Panel"
+      sorting_weight: 85
+    - id: grp_diag
+      name: "Diagnostics"
+      sorting_weight: 90
+
+# Why a board died, not just that it did. Read "Reset Reason" first:
+#   Brownout               -> power. Cable, supply, or a current spike.
+#   Task watchdog / IWDG   -> something blocked the loop.
+#   Panic / exception      -> firmware crash; "Last Crash" has the backtrace.
+#   Power on               -> the plug really was pulled.
+# Heap Free sagging over days is a leak; Heap Max Block collapsing while Free
+# looks fine is fragmentation. Either ends in a reboot that looks random.
+debug:
+  update_interval: 60s
+
+# Keeps the last crash -- reason, where the main loop was stuck, backtrace --
+# across the reboot and across power cuts. With no Home Assistant history
+# this is the only record a crash leaves.
+crash_report:
+  id: crash
+
+sensor:
+  - platform: wifi_signal
+    name: "Wi-Fi Signal"
+    update_interval: 60s
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: grp_diag
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: grp_diag
+  - platform: debug
+    free:
+      name: "Heap Free"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: grp_diag
+    block:
+      name: "Heap Max Block"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: grp_diag
+    loop_time:
+      name: "Loop Time"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: grp_diag
+
+text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Reset Reason"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: grp_diag
+  # Which build is actually on the board. A push is not live until it is
+  # flashed: compare this before believing a change is running.
+  - platform: version
+    name: "Firmware Build"
+    entity_category: diagnostic
+    web_server:
+      sorting_group_id: grp_diag
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: grp_diag
+  - platform: template
+    name: "Last Crash"
+    icon: "mdi:alert-octagon-outline"
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return {id(crash).summary()};'
+    web_server:
+      sorting_group_id: grp_diag
+  - platform: template
+    name: "Last Crash Backtrace"
+    icon: "mdi:format-list-numbered"
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return {id(crash).backtrace()};'
+    web_server:
+      sorting_group_id: grp_diag
+
+button:
+  - platform: restart
+    name: "Restart"
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_diag
+  - platform: template
+    name: "Clear Crash Report"
+    icon: "mdi:delete-sweep-outline"
+    entity_category: config
+    on_press:
+      - lambda: 'id(crash).clear();'
+    web_server:
+      sorting_group_id: grp_diag

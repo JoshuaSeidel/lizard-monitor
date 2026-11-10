@@ -1,0 +1,39 @@
+# CRESTED GECKO ENCLOSURE CONTROLLER -- Seeed XIAO ESP32-S3.
+# Put THIS in the ESPHome dashboard (as lizard-monitor.yaml).
+#
+# Heat bulb, UVB linear and LED day light on a CZH-Labs D-1585TL; two SHT45s
+# (top and bottom). Standalone: no Home Assistant, no MQTT. Everything --
+# live values, every setting, alarms, 24 h / 30 day charts -- is on the
+# device's own page at http://lizard-monitor.local/ (charts at /charts), and
+# on the LAFVIN C6 panel over BLE (lizard-panel-remote.yaml).
+#
+# Everything below packages: is pulled from GitHub main on every build. This
+# wrapper is the one file that is NOT, so nothing load-critical lives here:
+# only the identity, and only the optional relay_test switch below.
+#
+# device_name is LOAD-BEARING: the mDNS host, the fallback AP name and the
+# page address derive from it. Choose once.
+substitutions:
+  device_name: lizard-monitor
+  friendly_name: Lizard Monitor
+  # Relay identification test (see boards/xiao-esp32s3-lizard.yaml). Leave
+  # "false" except for the one flash where you are finding the wires.
+  relay_test: "false"
+
+packages:
+  lizard_monitor:
+    url: https://github.com/JoshuaSeidel/lizard-monitor
+    ref: main
+    files:
+      - packages/base.yaml
+      - boards/xiao-esp32s3-lizard.yaml
+      - packages/sensors.yaml
+      - packages/photoperiod.yaml
+      - packages/lamps.yaml
+      - packages/heat.yaml
+      - packages/alarms.yaml
+      - packages/maintenance.yaml
+      - packages/history.yaml
+      - packages/ble_link.yaml
+    # refresh defaults to 1d, which would silently build yesterday's config.
+    refresh: 0s

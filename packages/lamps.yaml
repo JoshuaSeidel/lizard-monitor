@@ -1,0 +1,171 @@
+# The three outlets' modes, and the UVB and LED relays.
+#
+# Each outlet has a Mode: Auto / On / Off, restored across reboots.
+#   Auto  follows packages/photoperiod.yaml (and, for the heat bulb, the
+#         heat loop in packages/heat.yaml). No clock = off.
+#   On    forced on, whatever the time -- and EXPIRES after "Manual On
+#         Expires After" hours, back to Auto. A UVB or day light left on
+#         by hand for maintenance must not run through the night: crested
+#         geckos are nocturnal, and night means dark. 0 = never expires.
+#         The heat bulb's On still obeys the hard cutoff and sensor faults
+#         (packages/heat.yaml); nothing overrides those.
+#   Off   forced off until changed. Does not expire: Off is what you set
+#         when a lamp is out or removed.
+#
+# The relays themselves are internal (boards/); "Day Light" and "UVB Lamp"
+# below show what the contacts are actually doing.
+substitutions:
+  manual_on_hours: "4"
+
+globals:
+  # Minutes each outlet has been in manual On. Restored, so a reboot does
+  # not restart the expiry clock -- and it counts uptime, not wall time, so
+  # it expires even with no SNTP.
+  - id: led_manual_min
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  - id: uvb_manual_min
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  - id: heat_manual_min
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+
+select:
+  - platform: template
+    name: "Day Light Mode"
+    id: led_mode
+    icon: "mdi:lightbulb-auto"
+    options: ["Auto", "On", "Off"]
+    initial_option: "Auto"
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: |-
+          id(led_manual_min) = 0;
+          ESP_LOGI("lamps", "Day Light mode -> %s", x.c_str());
+      - script.execute: apply_lamps
+    web_server:
+      sorting_group_id: grp_lamps
+      sorting_weight: 11
+  - platform: template
+    name: "UVB Mode"
+    id: uvb_mode
+    icon: "mdi:sun-wireless-outline"
+    options: ["Auto", "On", "Off"]
+    initial_option: "Auto"
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: |-
+          id(uvb_manual_min) = 0;
+          ESP_LOGI("lamps", "UVB mode -> %s", x.c_str());
+      - script.execute: apply_lamps
+    web_server:
+      sorting_group_id: grp_lamps
+      sorting_weight: 21
+  - platform: template
+    name: "Heat Lamp Mode"
+    id: heat_mode
+    icon: "mdi:heat-wave"
+    options: ["Auto", "On", "Off"]
+    initial_option: "Auto"
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: |-
+          id(heat_manual_min) = 0;
+          ESP_LOGI("lamps", "Heat Lamp mode -> %s", x.c_str());
+      - script.execute: heat_step
+    web_server:
+      sorting_group_id: grp_lamps
+      sorting_weight: 31
+
+number:
+  - platform: template
+    name: "Manual On Expires After"
+    id: manual_on_hours_n
+    icon: "mdi:timer-sand"
+    unit_of_measurement: "h"
+    min_value: 0
+    max_value: 24
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${manual_on_hours}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_lamps
+      sorting_weight: 90
+
+binary_sensor:
+  - platform: template
+    name: "Day Light"
+    id: led_state
+    icon: "mdi:lightbulb"
+    device_class: light
+    lambda: 'return id(led_relay).state;'
+    web_server:
+      sorting_group_id: grp_lamps
+      sorting_weight: 10
+  - platform: template
+    name: "UVB Lamp"
+    id: uvb_state
+    icon: "mdi:sun-wireless"
+    device_class: light
+    lambda: 'return id(uvb_relay).state;'
+    web_server:
+      sorting_group_id: grp_lamps
+      sorting_weight: 20
+
+script:
+  - id: apply_lamps
+    mode: queued
+    then:
+      - lambda: |-
+          // Index 0 Auto, 1 On, 2 Off.
+          const auto want = [](int mode, bool window) {
+            if (mode == 1) return true;
+            if (mode == 2) return false;
+            return id(clock_ok) && window;
+          };
+          const bool led = want(id(led_mode).active_index().value_or(0), id(led_window));
+          const bool uvb = want(id(uvb_mode).active_index().value_or(0), id(uvb_window));
+          if (led != id(led_relay).state) {
+            ESP_LOGI("lamps", "Day light %s", led ? "ON" : "OFF");
+            if (led) id(led_relay).turn_on(); else id(led_relay).turn_off();
+          }
+          if (uvb != id(uvb_relay).state) {
+            ESP_LOGI("lamps", "UVB %s", uvb ? "ON" : "OFF");
+            if (uvb) id(uvb_relay).turn_on(); else id(uvb_relay).turn_off();
+          }
+
+interval:
+  # Just after photoperiod's 15 s tick has refreshed the windows.
+  - interval: 15s
+    startup_delay: 2s
+    then:
+      - script.execute: apply_lamps
+
+  # Manual-On expiry.
+  - interval: 60s
+    then:
+      - lambda: |-
+          const float hours = id(manual_on_hours_n).state;
+          const uint32_t limit = (std::isnan(hours) || hours <= 0) ? 0 : (uint32_t) (hours * 60.0f);
+          struct M { select::Select *sel; uint32_t *min; const char *name; };
+          M ms[3] = {{id(led_mode), &id(led_manual_min), "Day Light"},
+                     {id(uvb_mode), &id(uvb_manual_min), "UVB"},
+                     {id(heat_mode), &id(heat_manual_min), "Heat Lamp"}};
+          for (auto &m : ms) {
+            if (m.sel->active_index().value_or(0) != 1) continue;
+            (*m.min)++;
+            if (limit != 0 && *m.min >= limit) {
+              ESP_LOGW("lamps", "%s manual On expired after %u min: back to Auto", m.name, (unsigned) *m.min);
+              m.sel->make_call().set_option("Auto").perform();
+            }
+          }

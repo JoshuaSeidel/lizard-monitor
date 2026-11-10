@@ -1,0 +1,504 @@
+# Alarms -- decided HERE, on the device, from the device's own thresholds.
+# There is no Home Assistant to second-guess them; the panel and the web
+# page only display what this file decides.
+#
+# THE ONE THAT MATTERS MOST is TOO HOT. Sustained mid-80s kills a crested
+# gecko, and heat kills faster than cold. It looks at BOTH sensors (whichever
+# is hotter), not just the top: a hot room heats the whole enclosure.
+#
+#   bit  alarm                         severity  condition
+#   0    too hot                       CRITICAL  either sensor >= Critical Hot for Hot Alarm Delay
+#   1    too cold                      CRITICAL  either sensor <= Cold Critical for Cold Critical Delay
+#   2    cool                          warning   either sensor <= Cold Warning for Cold Warning Delay
+#   3    wet too long                  warning   bottom RH > Wet Humidity for Wet Duration
+#   4    dry too long                  warning   bottom RH < Dry Humidity for Dry Duration
+#   5    top sensor fault              warning   (heat bulb is off because of it)
+#   6    bottom sensor fault           warning
+#   7    no temperature reading        CRITICAL  both sensors faulted: nothing is watching
+#   8    clock not set                 warning   (every lamp in Auto is off)
+#   9    heat bulb not heating         warning   Not-Heating Misses checks in a row failed
+#   10   warm: lamp off, still at cutoff  warning top >= Heat Cutoff for Warm Warning Delay
+#
+# "Too hot" also says whether the bulb has been off for 20+ minutes. If it
+# has and the enclosure is still climbing, the room itself is too hot -- or
+# the heat relay is stuck closed, which the device cannot tell apart and
+# cannot fix (there is no fan yet). Unplug the bulb and cool the room.
+#
+# HUMIDITY uses the BOTTOM sensor only. RH depends on temperature, so the
+# warmer top always reads drier; mixing the two would make the alarms
+# depend on which one happened to be checked. Wet/dry timers survive reboot.
+#
+# LATCHING. A 2 pm overheat that cleared by 4 pm is still news at 9 pm. Any
+# alarm that fires is added to "Unacknowledged Alarms" (restored across
+# reboots) until "Acknowledge Alarms" is pressed. The panel shows it too.
+substitutions:
+  critical_hot_f: "82"
+  hot_delay_min: "5"
+  warm_delay_min: "30"
+  cold_warn_f: "62"
+  cold_warn_delay_min: "30"
+  cold_crit_f: "58"
+  cold_crit_delay_min: "15"
+  wet_rh: "85"
+  wet_hours: "12"
+  dry_rh: "45"
+  dry_hours: "24"
+  not_heating_rise_f: "0.3"
+  not_heating_window_min: "10"
+  not_heating_misses: "3"
+  # Bits 0, 1, 7: too hot, too cold, no temperature reading. Not a setting --
+  # it names which alarms are critical, and the panel colours by it.
+  alarm_critical_mask: "0x83"
+
+globals:
+  - id: alarm_mask
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: alarm_latched
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  - id: alarm_latched_at
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # Epoch the bottom RH went wet / dry. Restored: a 12 h timer must not
+  # restart at every reboot. 0 = not in that state.
+  - id: wet_since
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  - id: dry_since
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  - id: not_heating_misses_count
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+number:
+  - platform: template
+    name: "Critical Hot"
+    id: crit_hot_n
+    icon: "mdi:thermometer-alert"
+    unit_of_measurement: "°F"
+    min_value: 76
+    max_value: 95
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${critical_hot_f}
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 10
+  - platform: template
+    name: "Hot Alarm Delay"
+    id: hot_delay_n
+    icon: "mdi:timer-alert-outline"
+    unit_of_measurement: "min"
+    min_value: 0
+    max_value: 60
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${hot_delay_min}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 11
+  - platform: template
+    name: "Warm Warning Delay"
+    id: warm_delay_n
+    icon: "mdi:timer-alert-outline"
+    unit_of_measurement: "min"
+    min_value: 1
+    max_value: 240
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${warm_delay_min}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 12
+  - platform: template
+    name: "Cold Warning"
+    id: cold_warn_n
+    icon: "mdi:thermometer-low"
+    unit_of_measurement: "°F"
+    min_value: 50
+    max_value: 72
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${cold_warn_f}
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 20
+  - platform: template
+    name: "Cold Warning Delay"
+    id: cold_warn_delay_n
+    icon: "mdi:timer-alert-outline"
+    unit_of_measurement: "min"
+    min_value: 0
+    max_value: 240
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${cold_warn_delay_min}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 21
+  - platform: template
+    name: "Cold Critical"
+    id: cold_crit_n
+    icon: "mdi:snowflake-alert"
+    unit_of_measurement: "°F"
+    min_value: 45
+    max_value: 68
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${cold_crit_f}
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 22
+  - platform: template
+    name: "Cold Critical Delay"
+    id: cold_crit_delay_n
+    icon: "mdi:timer-alert-outline"
+    unit_of_measurement: "min"
+    min_value: 0
+    max_value: 240
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${cold_crit_delay_min}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 23
+  - platform: template
+    name: "Wet Humidity"
+    id: wet_rh_n
+    icon: "mdi:water-alert"
+    unit_of_measurement: "%"
+    min_value: 60
+    max_value: 100
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${wet_rh}
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 30
+  - platform: template
+    name: "Wet Duration"
+    id: wet_hours_n
+    icon: "mdi:timer-alert-outline"
+    unit_of_measurement: "h"
+    min_value: 1
+    max_value: 72
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${wet_hours}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 31
+  - platform: template
+    name: "Dry Humidity"
+    id: dry_rh_n
+    icon: "mdi:water-off"
+    unit_of_measurement: "%"
+    min_value: 20
+    max_value: 70
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${dry_rh}
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 32
+  - platform: template
+    name: "Dry Duration"
+    id: dry_hours_n
+    icon: "mdi:timer-alert-outline"
+    unit_of_measurement: "h"
+    min_value: 1
+    max_value: 96
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${dry_hours}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 33
+  # Heat bulb not heating. Each time the relay closes after at least the
+  # bulb's minimum-off, the top should rise Not-Heating Rise within
+  # Not-Heating Window. A dead bulb fails that every time; a cold room can
+  # fail it now and then. So it takes Not-Heating Misses in a row. These
+  # are first guesses for a 13 W bulb with the sensor out of its beam --
+  # watch the 24 h chart for a few days and adjust.
+  - platform: template
+    name: "Not-Heating Rise"
+    id: nh_rise_n
+    icon: "mdi:thermometer-chevron-up"
+    unit_of_measurement: "°F"
+    min_value: 0.1
+    max_value: 5
+    step: 0.1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${not_heating_rise_f}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 40
+  - platform: template
+    name: "Not-Heating Window"
+    id: nh_window_n
+    icon: "mdi:timer-outline"
+    unit_of_measurement: "min"
+    min_value: 2
+    max_value: 60
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${not_heating_window_min}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 41
+  - platform: template
+    name: "Not-Heating Misses"
+    id: nh_misses_n
+    icon: "mdi:counter"
+    min_value: 1
+    max_value: 20
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${not_heating_misses}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_alarm_settings
+      sorting_weight: 42
+
+binary_sensor:
+  - platform: template
+    name: "Alarm"
+    id: alarm_any
+    device_class: problem
+    lambda: 'return id(alarm_mask) != 0;'
+    web_server:
+      sorting_group_id: grp_alarms
+      sorting_weight: 10
+  - platform: template
+    name: "Critical Alarm"
+    id: alarm_critical
+    device_class: safety
+    lambda: 'return (id(alarm_mask) & ${alarm_critical_mask}) != 0;'
+    web_server:
+      sorting_group_id: grp_alarms
+      sorting_weight: 11
+
+text_sensor:
+  - platform: template
+    name: "Alarm Reason"
+    id: alarm_reason
+    icon: "mdi:alert"
+    update_interval: never
+    web_server:
+      sorting_group_id: grp_alarms
+      sorting_weight: 20
+  - platform: template
+    name: "Unacknowledged Alarms"
+    id: alarm_latched_text
+    icon: "mdi:alert-decagram-outline"
+    update_interval: never
+    web_server:
+      sorting_group_id: grp_alarms
+      sorting_weight: 30
+
+button:
+  - platform: template
+    name: "Acknowledge Alarms"
+    icon: "mdi:check-all"
+    on_press:
+      - lambda: |-
+          ESP_LOGI("alarm", "Acknowledged (latched mask 0x%03X); anything still active re-latches now",
+                   (unsigned) id(alarm_latched));
+          id(alarm_latched) = 0;
+          id(alarm_latched_at) = 0;
+      - script.execute: alarm_step
+    web_server:
+      sorting_group_id: grp_alarms
+      sorting_weight: 31
+
+script:
+  - id: alarm_step
+    mode: queued
+    then:
+      - lambda: |-
+          static const char *const NAMES[11] = {
+              "too hot", "too cold", "cool", "wet too long", "dry too long", "top sensor fault",
+              "bottom sensor fault", "no temperature reading", "clock not set", "heat bulb not heating",
+              "warm: lamp off, still at cutoff"};
+          const uint32_t now_ms = millis();
+          auto clk = id(sntp_time).now();
+          const uint32_t now_s = clk.is_valid() ? (uint32_t) clk.timestamp : 0;
+
+          const bool tf = id(top_guard).is_fresh(), bf = id(bottom_guard).is_fresh();
+          const float tt = tf ? id(top_temp).state : NAN;
+          const float bt = bf ? id(bottom_temp).state : NAN;
+          const float hottest = std::isnan(tt) ? bt : (std::isnan(bt) ? tt : std::max(tt, bt));
+          const float coldest = std::isnan(tt) ? bt : (std::isnan(bt) ? tt : std::min(tt, bt));
+
+          // Condition held for a delay, on millis (minutes-scale, no clock needed).
+          const auto held = [&](uint32_t &since, bool cond, float delay_min) {
+            if (!cond) { since = 0; return false; }
+            if (since == 0) since = now_ms;
+            return (now_ms - since) >= (uint32_t) (delay_min * 60000.0f);
+          };
+          static uint32_t hot_s = 0, warm_s = 0, cold_s = 0, coldc_s = 0;
+          uint32_t m = 0;
+          if (held(hot_s, !std::isnan(hottest) && hottest >= id(crit_hot_n).state, id(hot_delay_n).state)) m |= 1u << 0;
+          if (held(coldc_s, !std::isnan(coldest) && coldest <= id(cold_crit_n).state, id(cold_crit_delay_n).state)) m |= 1u << 1;
+          if (held(cold_s, !std::isnan(coldest) && coldest <= id(cold_warn_n).state, id(cold_warn_delay_n).state)) m |= 1u << 2;
+          if (held(warm_s, !std::isnan(tt) && tt >= id(heat_cutoff_n).state, id(warm_delay_n).state)) m |= 1u << 10;
+          if (m & (1u << 1)) m &= ~(1u << 2);  // critical cold supersedes the warning
+
+          // Humidity, on the bottom sensor, on wall-clock time so the timers
+          // survive a reboot. 3 % hysteresis on the way out.
+          if (bf && now_s != 0) {
+            const float rh = id(bottom_rh).state;
+            if (rh > id(wet_rh_n).state) { if (id(wet_since) == 0) id(wet_since) = now_s; }
+            else if (rh < id(wet_rh_n).state - 3.0f) id(wet_since) = 0;
+            if (rh < id(dry_rh_n).state) { if (id(dry_since) == 0) id(dry_since) = now_s; }
+            else if (rh > id(dry_rh_n).state + 3.0f) id(dry_since) = 0;
+          }
+          if (id(wet_since) != 0 && now_s != 0 && now_s - id(wet_since) >= id(wet_hours_n).state * 3600.0f) m |= 1u << 3;
+          if (id(dry_since) != 0 && now_s != 0 && now_s - id(dry_since) >= id(dry_hours_n).state * 3600.0f) m |= 1u << 4;
+
+          // Boot grace: the sensors' first sample and the first SNTP answer
+          // take a few seconds to a minute. Without this, every reboot would
+          // latch "sensor fault" and "clock not set" for an event that never
+          // happened. Control does not wait: the heat bulb stays off on its
+          // own until both are in.
+          if (now_ms >= 120000) {
+            if (!tf && !bf) m |= 1u << 7;
+            else {
+              if (!tf) m |= 1u << 5;
+              if (!bf) m |= 1u << 6;
+            }
+            if (!id(clock_ok)) m |= 1u << 8;
+          }
+
+          // Heat bulb not heating: one check per relay close (see the numbers).
+          {
+            static bool prev_on = false, armed = false;
+            static uint32_t arm_ms = 0;
+            static float arm_t = NAN;
+            const bool on = id(heat_lamp_relay).state;
+            if (on && !prev_on) {
+              const uint32_t off_ms = now_ms - id(heat_off_since_ms);  // 0 = off since boot
+              armed = tf && off_ms >= (uint32_t) (id(heat_min_off_n).state * 60000.0f);
+              arm_ms = now_ms;
+              arm_t = tt;
+            }
+            if (!on) armed = false;
+            if (armed && tf && now_ms - arm_ms >= (uint32_t) (id(nh_window_n).state * 60000.0f)) {
+              const float rise = tt - arm_t;
+              if (rise < id(nh_rise_n).state) {
+                id(not_heating_misses_count)++;
+                ESP_LOGW("alarm", "Heat bulb on %.0f min, top rose only %.2f °F (miss %d)",
+                         id(nh_window_n).state, rise, id(not_heating_misses_count));
+              } else {
+                id(not_heating_misses_count) = 0;
+              }
+              armed = false;
+            }
+            prev_on = on;
+            if (id(not_heating_misses_count) >= (int) id(nh_misses_n).state) m |= 1u << 9;
+          }
+
+          // Reason text, most severe first.
+          std::string r;
+          const auto add = [&](const char *s) { if (!r.empty()) r += "; "; r += s; };
+          char b[160];
+          if (m & (1u << 0)) {
+            const uint32_t off_min = id(heat_lamp_relay).state ? 0 : (now_ms - id(heat_off_since_ms)) / 60000;
+            if (!id(heat_lamp_relay).state && off_min >= 20)
+              snprintf(b, sizeof(b), "TOO HOT %.1f °F, bulb off %u min: room too hot or heat relay stuck. Unplug the bulb, cool the room",
+                       hottest, (unsigned) off_min);
+            else
+              snprintf(b, sizeof(b), "TOO HOT %.1f °F (critical %.1f)", hottest, id(crit_hot_n).state);
+            add(b);
+          }
+          if (m & (1u << 7)) add("NO TEMPERATURE READING: both sensors faulted, heat bulb off");
+          if (m & (1u << 1)) { snprintf(b, sizeof(b), "TOO COLD %.1f °F (critical %.1f)", coldest, id(cold_crit_n).state); add(b); }
+          if (m & (1u << 10)) { snprintf(b, sizeof(b), "warm: top %.1f °F at cutoff for %.0f+ min with the bulb off", tt, id(warm_delay_n).state); add(b); }
+          if (m & (1u << 2)) { snprintf(b, sizeof(b), "cool %.1f °F (warning %.1f)", coldest, id(cold_warn_n).state); add(b); }
+          if (m & (1u << 5)) { snprintf(b, sizeof(b), "top sensor fault (%s), heat bulb off", id(top_sensor_status).state.c_str()); add(b); }
+          if (m & (1u << 6)) { snprintf(b, sizeof(b), "bottom sensor fault (%s)", id(bottom_sensor_status).state.c_str()); add(b); }
+          if (m & (1u << 3)) { snprintf(b, sizeof(b), "wet: bottom RH over %.0f%% for %.0f+ h (mould risk)", id(wet_rh_n).state, id(wet_hours_n).state); add(b); }
+          if (m & (1u << 4)) { snprintf(b, sizeof(b), "dry: bottom RH under %.0f%% for %.0f+ h (missed misting?)", id(dry_rh_n).state, id(dry_hours_n).state); add(b); }
+          if (m & (1u << 9)) add("heat bulb not heating: burned out or unplugged?");
+          if (m & (1u << 8)) add("clock not set: no SNTP answer, every lamp in Auto is off");
+          if (r.empty()) r = "none";
+
+          if (m != id(alarm_mask)) {
+            ESP_LOGW("alarm", "Alarms 0x%03X -> 0x%03X: %s", (unsigned) id(alarm_mask), (unsigned) m, r.c_str());
+            id(alarm_mask) = m;
+          }
+          if (id(alarm_reason).state != r) id(alarm_reason).publish_state(r);
+
+          // Latch.
+          const uint32_t fresh_bits = m & ~id(alarm_latched);
+          if (fresh_bits) {
+            if (id(alarm_latched) == 0) id(alarm_latched_at) = now_s;
+            id(alarm_latched) |= fresh_bits;
+          }
+          std::string l;
+          if (id(alarm_latched) == 0) {
+            l = "none";
+          } else {
+            if (id(alarm_latched_at) != 0)
+              l = ESPTime::from_epoch_local(id(alarm_latched_at)).strftime("since %b %d %H:%M: ");
+            else
+              l = "since before the clock was set: ";
+            bool first = true;
+            for (int i = 0; i < 11; i++) {
+              if (!(id(alarm_latched) & (1u << i))) continue;
+              if (!first) l += ", ";
+              l += NAMES[i];
+              first = false;
+            }
+          }
+          if (id(alarm_latched_text).state != l) id(alarm_latched_text).publish_state(l);
+
+interval:
+  - interval: 10s
+    startup_delay: 15s
+    then:
+      - script.execute: alarm_step

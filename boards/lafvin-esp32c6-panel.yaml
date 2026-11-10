@@ -1,0 +1,74 @@
+# LAFVIN ESP32-C6 with the on-board 1.47" 172x320 ST7789V LCD -- the
+# ENCLOSURE PANEL. A clone of Waveshare's ESP32-C6-LCD-1.47; ESPHome's board
+# preset for that panel fits it exactly (cs/dc/reset, the 34 px offset and
+# colour inversion), as tank-monitor's boards/lafvin-esp32c6.yaml found.
+#
+# Nothing to wire: the display, backlight and BOOT button are on the board.
+# USB-C for power. It talks to the controller over BLE (packages/panel.yaml).
+#
+#   signal          GPIO   notes
+#   LCD SCLK        7      on board
+#   LCD MOSI        6      on board
+#   LCD backlight   22     on board, PWM (ledc)
+#   BOOT button     9      on board; after boot it is the WAKE button
+#
+# This board ran tank-monitor before. packages/base.yaml's nvs_wipe erases
+# that NVS on the first boot of this firmware.
+#
+# WHAT THIS FILE OWES packages/panel.yaml -- the board contract:
+#   display id: panel_display        (the lambda lives in panel.yaml)
+#   output id: backlight_output      (panel.yaml drives the brightness)
+#   binary_sensor id: wake_button
+
+esp32:
+  variant: esp32c6
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+substitutions:
+  # 270, as on tank-monitor: the USB end to the right when it stands
+  # landscape. Use 90 if it is mounted the other way up.
+  panel_rotation: "270"
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO6
+
+output:
+  - platform: ledc
+    id: backlight_output
+    pin: GPIO22
+
+display:
+  - platform: mipi_spi
+    id: panel_display
+    # mipi_spi, not st7789v: with a 90/270 rotation the older driver needs a
+    # full framebuffer and handles it worse; this one is the proven path on
+    # this exact board.
+    model: WAVESHARE-ESP32-C6-LCD-1.47
+    rotation: ${panel_rotation}
+    # Enclosure air does not change meaningfully in 2 s, and a full redraw
+    # costs a few hundred ms of SPI.
+    update_interval: 2s
+    # The lambda paints every pixel itself.
+    auto_clear_enabled: false
+    # Whole frame in one buffer (320*172*2 = 110 kB): the C6 has the heap,
+    # and rendering in stripes re-runs the lambda per stripe.
+    buffer_size: 100%
+    # The drawing lambda is packages/panel.yaml's (it extends this id).
+
+binary_sensor:
+  - platform: gpio
+    id: wake_button
+    pin:
+      number: GPIO9
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+      # The BOOT strap. Fine as a button once booted; holding it during a
+      # reset puts the chip into download mode, which is what it is for.
+      ignore_strapping_warning: true
+    filters:
+      - delayed_on: 30ms

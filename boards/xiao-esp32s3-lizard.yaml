@@ -1,0 +1,169 @@
+# Seeed XIAO ESP32-S3 -- CRESTED GECKO ENCLOSURE CONTROLLER. Headless.
+#
+# Two SHT45s (top, bottom) on the S3's two I2C controllers, and three relay
+# outlets on a CZH-Labs D-1585TL 4-channel IoT relay outlet module: heat
+# bulb, UVB linear, LED day light. Channel 4 is the spare for a future
+# mister or fan and is NOT wired or configured -- no entity exists for an
+# outlet that drives nothing.
+#
+# PAD LABELS ARE NOT GPIO NUMBERS. Wire by the silkscreen column.
+#   D0=1  D1=2  D2=3  D3=4  D4=5  D5=6  D6=43  D7=44  D8=7  D9=8  D10=9
+#
+#   signal                      SILKSCREEN   GPIO   wire (suggested)
+#   I2C bus A SDA  (TOP SHT45)  D6           43     white
+#   I2C bus A SCL  (TOP SHT45)  D7           44     brown
+#   I2C bus B SDA  (BOTTOM)     D4           5      green
+#   I2C bus B SCL  (BOTTOM)     D5           6      yellow
+#   relay CH1 IN+  HEAT BULB    D8           7      purple
+#   relay CH2 IN+  UVB          D9           8      blue
+#   relay CH3 IN+  LED          D10          9      orange
+#   relay IN- x3, SHT45 GND x2  GND          --     black
+#   SHT45 VCC x2                3V3          --     red
+#
+# Spare: D0 (GPIO1), D1 (GPIO2), D3 (GPIO4).
+# D2 = GPIO3 stays EMPTY: it is an S3 strapping pin and nothing may hold it
+# at a level during boot.
+# GPIO43/44 are U0TXD/U0RXD, free because the logger runs over native USB.
+#
+# BOTH SHT45s ARE 0x44. That is why there are two buses -- one sensor each,
+# no address pin work. Never hand-splice an address pin to get a second
+# address: that splice shorted the 3V3 rail twice on tank-monitor's 75 gal.
+# The breakouts carry their own I2C pull-ups; leave them as shipped.
+#
+# The D-1585TL's inputs are optocoupled and ACTIVE HIGH: 3.3 V on IN+
+# closes the outlet. No `inverted:` anywhere. The input side draws ~1 mA
+# and needs no supply of its own; a GPIO drives it directly.
+#
+# SET EVERY CHANNEL TO "NORMALLY OFF". CZH's current 4-channel module (sold
+# as D-1703TL in 2026) has a DIP switch per channel: Normally OFF / Normally
+# ON / Always OFF / Always ON. "Normally ON" inverts the channel, so a dead,
+# unplugged or rebooting controller would leave the HEAT BULB ON -- the one
+# failure this whole design exists to prevent. If your module has the
+# switch, check it before plugging a lamp in.
+#
+# WHAT THIS FILE OWES THE SHARED PACKAGES -- the board contract:
+#   i2c id: i2c_top, i2c_bottom      -> packages/sensors.yaml (SHT45 x2)
+#   output id: heat_lamp_output      -> packages/heat.yaml
+#     (time_proportioning; its state_change_action publishes
+#      heat_lamp_relay, which packages/heat.yaml defines)
+#   switch id: uvb_relay, led_relay  -> packages/lamps.yaml
+
+esp32:
+  board: seeed_xiao_esp32s3
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+external_components:
+  - source: ${components_source}
+    components: [time_proportioning]
+    refresh: 0s
+
+i2c:
+  # Bus A: the TOP sensor. Silkscreen D6 / D7.
+  - id: i2c_top
+    sda: GPIO43
+    scl: GPIO44
+    frequency: 100kHz
+    scan: true
+  # Bus B: the BOTTOM sensor. Silkscreen D4 / D5.
+  - id: i2c_bottom
+    sda: GPIO5
+    scl: GPIO6
+    frequency: 100kHz
+    scan: true
+
+# Heat bulb: time-proportioning, not slow_pwm (components/time_proportioning
+# explains the 1.7x over-delivery slow_pwm caused on the 75 gal). The bulb
+# EMITS LIGHT, so every on/off is visible to the gecko: these are long, and
+# all three are re-applied at boot from the Heat Lamp Cycle Period / Minimum
+# On / Minimum Off numbers in packages/heat.yaml. The values here are only
+# what the output runs with for the second before that happens.
+output:
+  - platform: time_proportioning
+    id: heat_lamp_output
+    # Silkscreen D8. Relay CH1.
+    pin: GPIO7
+    period: 1800s
+    min_on_time: 600s
+    min_off_time: 600s
+    state_change_action:
+      - binary_sensor.template.publish:
+          id: heat_lamp_relay
+          state: !lambda "return state;"
+
+# UVB and LED: plain on/off, driven by packages/lamps.yaml. Internal: the
+# user-facing control is each lamp's Mode select. A switch you could flip
+# here would be put back by the schedule within 15 s, which only confuses.
+# Boot OFF: the schedule turns them on once the clock is known.
+switch:
+  - platform: gpio
+    id: uvb_relay
+    internal: true
+    # Silkscreen D9. Relay CH2.
+    pin: GPIO8
+    restore_mode: ALWAYS_OFF
+  - platform: gpio
+    id: led_relay
+    internal: true
+    # Silkscreen D10. Relay CH3.
+    pin: GPIO9
+    restore_mode: ALWAYS_OFF
+
+# ---------------------------------------------------------------
+# Relay identification test -- OFF unless the wrapper turns it on
+# ---------------------------------------------------------------
+# For finding which wire went to which outlet without Wi-Fi or a web page.
+# Put this in the WRAPPER's substitutions, flash, watch the relay box, then
+# set it back to "false" and flash again:
+#   relay_test: "true"
+# From 20 s after boot, three rounds of: relay 1 clicks ONCE, pause; relay 2
+# TWICE, pause; relay 3 three times. The count is the relay -- 1 heat bulb
+# (D8), 2 UVB (D9), 3 LED (D10) -- and each step is logged at WARN.
+# UNPLUG THE LAMPS from the outlets first (rapid cycling is bad for a UVB
+# ballast and a bulb filament). The test drives the pins directly, so
+# nothing fights it, and hands them back to the controller when it ends.
+substitutions:
+  relay_test: "false"
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (!${relay_test}) return;
+          struct Relay { gpio_num_t pin; const char *what; };
+          static const Relay R[3] = {
+              {GPIO_NUM_7, "relay 1 HEAT BULB (D8, purple)"},
+              {GPIO_NUM_8, "relay 2 UVB       (D9, blue)"},
+              {GPIO_NUM_9, "relay 3 LED       (D10, orange)"}};
+          static int t = -20;  // seconds since the test began; starts 20 s after boot
+          t++;
+          if (t < 0) return;
+          // One round: relay k gets 2k seconds of 1 s on / 1 s off (k clicks)
+          // and then a 4 s pause. 6 + 8 + 10 = 24 s a round, three rounds.
+          const int ROUND = 24, ROUNDS = 3;
+          if (t == 0) {
+            ESP_LOGW("relay_test", "RELAY TEST: count the clicks -- 1 heat bulb, 2 UVB, 3 LED");
+            for (auto &r : R) gpio_set_level(r.pin, 0);
+          }
+          if (t >= ROUND * ROUNDS) {
+            if (t == ROUND * ROUNDS) {
+              for (auto &r : R) gpio_set_level(r.pin, 0);
+              // Back to what the controller wants. The heat output re-asserts
+              // its pin on its next switch; the switches are re-written here.
+              gpio_set_level(GPIO_NUM_8, id(uvb_relay).state);
+              gpio_set_level(GPIO_NUM_9, id(led_relay).state);
+              ESP_LOGW("relay_test", "RELAY TEST done. Set relay_test back to \"false\" and reflash.");
+            }
+            return;
+          }
+          int s = t % ROUND;
+          for (int k = 0; k < 3; k++) {
+            const int seg = 2 * (k + 1) + 4;
+            if (s >= seg) { s -= seg; continue; }
+            const bool on = s < 2 * (k + 1) && s % 2 == 0;
+            gpio_set_level(R[k].pin, on);
+            if (on) ESP_LOGW("relay_test", "round %d: %s click %d of %d", t / ROUND + 1, R[k].what, s / 2 + 1, k + 1);
+            break;
+          }

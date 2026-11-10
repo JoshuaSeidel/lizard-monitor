@@ -1,0 +1,403 @@
+# THE PANEL -- what you see standing in front of the enclosure.
+#
+# Reads the controller's frame over BLE (packages/ble_link.yaml documents
+# the fields) and draws it. READ-ONLY: nothing here sets anything on the
+# controller, and every threshold it colours by comes FROM the controller,
+# so there is no second copy to drift.
+#
+#   banner     red = critical alarm, amber = warning, dark = all clear (an
+#              unacknowledged past alarm shows in amber text on dark)
+#   two halves TOP and BOTTOM temperature with RH, each coloured by the
+#              controller's own bands:
+#                red    >= Critical Hot        amber  >= Heat Cutoff
+#                green  comfortable
+#                light blue <= Cold Warning    blue   <= Cold Critical
+#   row        gradient (top minus bottom) and what the heat bulb is doing
+#   footer     lamps on, maintenance due, and how old the data is
+#
+# STALE IS SHOWN AS STALE. No valid frame for 45 s (the controller sends
+# every 10 s) and every number becomes "--" under a red NO DATA banner. A
+# blank that admits it is blank beats a confident number from an hour ago.
+#
+# NIGHT IS DARK. Crested geckos are nocturnal; a lit LCD beside the glass
+# all night is light pollution. Outside the controller's Day Light window
+# the backlight drops to Night Brightness (0 = off by default) -- unless
+# there is an active alarm or the link is down, which light it up, or the
+# BOOT button is pressed, which wakes it for Wake Duration.
+#
+# The controller's BLE MAC is required (wrapper substitution
+# controller_ble_mac). It has NO default: a wrong MAC compiles cleanly and
+# then never connects, so an unset one must fail the build instead.
+
+esp32_ble_tracker:
+  scan_parameters:
+    # Only ever looking for one known MAC. Passive scanning transmits
+    # nothing, which matters on a chip sharing one antenna with Wi-Fi.
+    active: false
+    interval: 1100ms
+    window: 100ms
+
+ble_client:
+  - id: ctrl_ble
+    mac_address: ${controller_ble_mac}
+    on_connect:
+      - lambda: |-
+          id(p_connected) = true;
+          ESP_LOGI("panel", "controller connected");
+    on_disconnect:
+      - lambda: |-
+          id(p_connected) = false;
+          ESP_LOGW("panel", "controller disconnected");
+
+color:
+  - id: COLOR_INK
+    hex: "0A0A0A"
+  - id: COLOR_WHITE
+    hex: "E8E8E8"
+  - id: COLOR_GREEN
+    hex: "3ECF6E"
+  - id: COLOR_LIGHTBLUE
+    hex: "7FC4FF"
+  - id: COLOR_BLUE
+    hex: "2F80FF"
+  - id: COLOR_AMBER
+    hex: "FFB020"
+  - id: COLOR_RED
+    hex: "FF4438"
+  - id: COLOR_NIGHT
+    hex: "10161F"
+  - id: COLOR_DIM
+    hex: "5A626E"
+
+font:
+  - file: "gfonts://Roboto@900"
+    id: font_big
+    size: 56
+    glyphs: "0123456789.-"
+  - file: "gfonts://Roboto@700"
+    id: font_mid
+    size: 18
+    glyphs: " !%+-.0123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz°()"
+  - file: "gfonts://Roboto@700"
+    id: font_small
+    size: 14
+    glyphs: " !%+-./0123456789:;ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz°()"
+
+globals:
+  # The last frame that fully parsed, fields as floats (see ble_link.yaml).
+  # NOT restored: after a reboot the honest answer is "nothing yet".
+  - id: p_f
+    type: std::array<float, 22>
+    restore_value: false
+  - id: p_stamp_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: p_connected
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: p_wake_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: p_bad_frames
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+number:
+  - platform: template
+    name: "Day Brightness"
+    id: day_brightness_n
+    icon: "mdi:brightness-7"
+    unit_of_measurement: "%"
+    min_value: 5
+    max_value: 100
+    step: 5
+    mode: slider
+    optimistic: true
+    restore_value: true
+    initial_value: 80
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 10
+  - platform: template
+    name: "Night Brightness"
+    id: night_brightness_n
+    icon: "mdi:brightness-3"
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 50
+    step: 1
+    mode: slider
+    optimistic: true
+    restore_value: true
+    initial_value: 0
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 11
+  - platform: template
+    name: "Wake Duration"
+    id: wake_duration_n
+    icon: "mdi:timer-outline"
+    unit_of_measurement: "s"
+    min_value: 10
+    max_value: 600
+    step: 10
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: 60
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 12
+
+text_sensor:
+  - platform: ble_client
+    ble_client_id: ctrl_ble
+    id: ble_tele
+    internal: true
+    service_uuid: "5a1e0001-6c69-7a61-7264-2d6d6f6e6974"
+    characteristic_uuid: "5a1e0002-6c69-7a61-7264-2d6d6f6e6974"
+    notify: true
+    on_value:
+      - lambda: |-
+          // Checked, not trusted: a truncated read (MTU not negotiated) is
+          // still a string of numbers. Exactly 22 fields at version 1, or
+          // nothing is published and the frame is counted as bad.
+          const std::string &s = x;
+          std::array<float, 22> f{};
+          int n = 0;
+          size_t start = 0;
+          bool junk = false;
+          while (start <= s.size() && n <= 22) {
+            const size_t comma = s.find(',', start);
+            const std::string tok = s.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            if (tok.empty()) { junk = true; break; }
+            char *end = nullptr;
+            const float v = strtof(tok.c_str(), &end);
+            if (end == tok.c_str() || *end != '\0') { junk = true; break; }
+            if (n < 22) f[n] = v;
+            n++;
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+          }
+          if (junk || n != 22) {
+            id(p_bad_frames)++;
+            ESP_LOGW("panel", "bad frame: %d fields in %u bytes -- MTU too small or a version skew?",
+                     n, (unsigned) s.size());
+            return;
+          }
+          if ((int) f[0] != 1) {
+            id(p_bad_frames)++;
+            ESP_LOGW("panel", "frame version %d; this panel speaks 1 -- flash both boards", (int) f[0]);
+            return;
+          }
+          id(p_f) = f;
+          id(p_stamp_ms) = millis();
+
+  # Short form of the controller's active alarms, for the panel's own page.
+  - platform: template
+    name: "Controller Alarms"
+    icon: "mdi:alert"
+    update_interval: 10s
+    lambda: |-
+      if (id(p_stamp_ms) == 0 || millis() - id(p_stamp_ms) > 45000) return {"no data"};
+      const uint32_t m = (uint32_t) id(p_f)[11];
+      if (m == 0) return {"none"};
+      char b[16];
+      snprintf(b, sizeof(b), "mask 0x%03X", (unsigned) m);
+      return {std::string(b) + " (see the controller page)"};
+    web_server:
+      sorting_group_id: grp_status
+      sorting_weight: 10
+
+sensor:
+  - platform: template
+    name: "Link Age"
+    id: link_age
+    icon: "mdi:timer-sand"
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      if (id(p_stamp_ms) == 0) return NAN;
+      return (millis() - id(p_stamp_ms)) / 1000.0f;
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 1
+  - platform: template
+    name: "Bad Frames"
+    icon: "mdi:alert-circle-outline"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return (float) id(p_bad_frames);'
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 4
+
+binary_sensor:
+  # Fresh data, not merely a GATT connection: a connection can stay up
+  # while notifications stop, and that looks healthy if you only watch it.
+  - platform: template
+    name: "Controller Link"
+    id: controller_link
+    device_class: connectivity
+    lambda: 'return id(p_stamp_ms) != 0 && millis() - id(p_stamp_ms) < 45000;'
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 2
+  - platform: template
+    name: "BLE Connected"
+    device_class: connectivity
+    entity_category: diagnostic
+    lambda: 'return id(p_connected);'
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 3
+  - id: !extend wake_button
+    on_press:
+      - lambda: |-
+          id(p_wake_ms) = millis();
+          ESP_LOGI("panel", "woken by button");
+
+# Backlight. Straight on the PWM output: there is no light entity to leave
+# at the wrong brightness from the web page -- the rule below owns it.
+interval:
+  - interval: 500ms
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const bool live = id(p_stamp_ms) != 0 && now - id(p_stamp_ms) < 45000;
+          const auto &f = id(p_f);
+          const bool alarm = live && f[10] >= 1.0f;
+          const bool day = live && f[15] > 0.5f;
+          const bool woken = id(p_wake_ms) != 0 &&
+                             now - id(p_wake_ms) < (uint32_t) (id(wake_duration_n).state * 1000.0f);
+          float pct;
+          if (woken || alarm || !live || day) pct = id(day_brightness_n).state;
+          else pct = id(night_brightness_n).state;
+          if (std::isnan(pct)) pct = 80.0f;
+          static float last = -1.0f;
+          if (pct != last) {
+            id(backlight_output).set_level(pct / 100.0f);
+            last = pct;
+          }
+
+display:
+  - id: !extend panel_display
+    lambda: |-
+      const uint32_t now = millis();
+      const bool have = id(p_stamp_ms) != 0;
+      const uint32_t age_s = have ? (now - id(p_stamp_ms)) / 1000 : 0;
+      const bool live = have && age_s < 45;
+      const auto &f = id(p_f);
+      const auto val = [&](int i) { return (!live || f[i] <= -998.0f) ? NAN : f[i]; };
+
+      const uint32_t active = live ? (uint32_t) f[11] : 0;
+      const uint32_t latched = live ? (uint32_t) f[12] : 0;
+      const uint32_t maint = live ? (uint32_t) f[13] : 0;
+      const int sev = live ? (int) f[10] : 0;
+
+      // Alarm bits in order of severity, short names (packages/alarms.yaml).
+      static const int ORDER[11] = {0, 7, 1, 10, 2, 5, 6, 3, 4, 9, 8};
+      static const char *const SHORT[11] = {
+          "TOO HOT", "TOO COLD", "COOL", "WET TOO LONG", "DRY TOO LONG", "TOP SENSOR FAULT",
+          "BOTTOM SENSOR FAULT", "NO TEMP READING", "CLOCK NOT SET", "BULB NOT HEATING", "WARM AT CUTOFF"};
+      const auto first_of = [&](uint32_t mask, int &count) -> const char * {
+        const char *first = nullptr;
+        count = 0;
+        for (int k = 0; k < 11; k++) {
+          if (!(mask & (1u << ORDER[k]))) continue;
+          if (first == nullptr) first = SHORT[ORDER[k]];
+          count++;
+        }
+        return first;
+      };
+
+      // ---- banner ----
+      Color b_bg = COLOR_NIGHT, b_ink = COLOR_WHITE;
+      char banner[48];
+      if (!live) {
+        b_bg = COLOR_RED; b_ink = COLOR_INK;
+        snprintf(banner, sizeof(banner), have ? "NO DATA FROM CONTROLLER" : "WAITING FOR CONTROLLER");
+      } else if (active) {
+        int count;
+        const char *first = first_of(active, count);
+        b_bg = sev >= 2 ? COLOR_RED : COLOR_AMBER; b_ink = COLOR_INK;
+        if (count > 1) snprintf(banner, sizeof(banner), "%s +%d", first, count - 1);
+        else snprintf(banner, sizeof(banner), "%s", first);
+      } else if (latched) {
+        int count;
+        const char *first = first_of(latched, count);
+        b_ink = COLOR_AMBER;
+        snprintf(banner, sizeof(banner), "earlier: %s%s - ack on device", first, count > 1 ? " +" : "");
+      } else {
+        snprintf(banner, sizeof(banner), "ALL OK");
+        b_ink = COLOR_GREEN;
+      }
+      it.filled_rectangle(0, 0, 320, 26, b_bg);
+      it.print(160, 20, id(font_mid), b_ink, TextAlign::BASELINE_CENTER, banner);
+
+      // ---- the two halves ----
+      const float target = val(16), cutoff = val(17), crit = val(18), coldw = val(19), coldc = val(20);
+      const auto band = [&](float t) {
+        if (std::isnan(t)) return COLOR_DIM;
+        if (!std::isnan(crit) && t >= crit) return COLOR_RED;
+        if (!std::isnan(cutoff) && t >= cutoff) return COLOR_AMBER;
+        if (!std::isnan(coldc) && t <= coldc) return COLOR_BLUE;
+        if (!std::isnan(coldw) && t <= coldw) return COLOR_LIGHTBLUE;
+        return COLOR_GREEN;
+      };
+      const auto half = [&](int x0, const char *label, float t, float rh) {
+        it.filled_rectangle(x0, 26, 159, 102, band(t));
+        it.print(x0 + 8, 44, id(font_small), COLOR_INK, TextAlign::BASELINE_LEFT, label);
+        if (std::isnan(t)) it.print(x0 + 80, 100, id(font_big), COLOR_INK, TextAlign::BASELINE_CENTER, "--.-");
+        else it.printf(x0 + 80, 100, id(font_big), COLOR_INK, TextAlign::BASELINE_CENTER, "%.1f", t);
+        if (std::isnan(rh)) it.print(x0 + 80, 122, id(font_mid), COLOR_INK, TextAlign::BASELINE_CENTER, "RH --");
+        else it.printf(x0 + 80, 122, id(font_mid), COLOR_INK, TextAlign::BASELINE_CENTER, "RH %.0f%%", rh);
+      };
+      half(0, "TOP °F", val(1), val(3));
+      it.filled_rectangle(159, 26, 2, 102, COLOR_INK);
+      half(161, "BOTTOM °F", val(2), val(4));
+
+      // ---- gradient and heat ----
+      it.filled_rectangle(0, 128, 320, 22, COLOR_NIGHT);
+      const float grad = val(5);
+      if (std::isnan(grad)) it.print(6, 145, id(font_small), COLOR_WHITE, TextAlign::BASELINE_LEFT, "gradient --");
+      else it.printf(6, 145, id(font_small), COLOR_WHITE, TextAlign::BASELINE_LEFT, "gradient %+.1f°F", grad);
+      char heat[40] = "heat --";
+      if (live) {
+        switch ((int) f[21]) {
+          case 0: snprintf(heat, sizeof(heat), "heat %.0f%% to %.0f°F", f[6], target); break;
+          case 1: snprintf(heat, sizeof(heat), "heat at target %.0f°F", target); break;
+          case 2: snprintf(heat, sizeof(heat), "heat off: night"); break;
+          case 3: snprintf(heat, sizeof(heat), "HEAT OFF: CUTOFF"); break;
+          case 4: snprintf(heat, sizeof(heat), "HEAT OFF: SENSOR"); break;
+          case 5: snprintf(heat, sizeof(heat), "HEAT OFF: NO CLOCK"); break;
+          case 6: snprintf(heat, sizeof(heat), "heat off (manual)"); break;
+          default: snprintf(heat, sizeof(heat), "heat ON (manual)"); break;
+        }
+      }
+      it.print(314, 145, id(font_small), COLOR_WHITE, TextAlign::BASELINE_RIGHT, heat);
+
+      // ---- footer: lamps, maintenance, data age ----
+      it.filled_rectangle(0, 150, 320, 22, COLOR_NIGHT);
+      it.horizontal_line(0, 150, 320, COLOR_DIM);
+      const auto lamp = [&](int x, const char *name, bool on) {
+        it.print(x, 167, id(font_small), on ? COLOR_AMBER : COLOR_DIM, TextAlign::BASELINE_LEFT, name);
+      };
+      lamp(6, "LED", live && f[8] > 0.5f);
+      lamp(44, "UVB", live && f[9] > 0.5f);
+      lamp(84, "HEAT", live && f[7] > 0.5f);
+      char foot[40];
+      if (maint & 1) snprintf(foot, sizeof(foot), "UVB due  %us", (unsigned) age_s);
+      else if (maint & 2) snprintf(foot, sizeof(foot), "recal due  %us", (unsigned) age_s);
+      else if (!have) snprintf(foot, sizeof(foot), "no data yet");
+      else if (age_s < 90) snprintf(foot, sizeof(foot), "%us ago", (unsigned) age_s);
+      else if (age_s < 5400) snprintf(foot, sizeof(foot), "%um ago", (unsigned) (age_s / 60));
+      else snprintf(foot, sizeof(foot), "%uh ago", (unsigned) (age_s / 3600));
+      it.print(314, 167, id(font_small), live ? COLOR_WHITE : COLOR_RED, TextAlign::BASELINE_RIGHT, foot);

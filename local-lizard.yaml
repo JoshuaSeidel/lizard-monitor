@@ -1,0 +1,22 @@
+# Local build of lizard-monitor-remote.yaml against this checkout instead of
+# GitHub main. Same files, same order. For `esphome config` / `esphome
+# compile` before pushing -- never what the dashboard builds.
+substitutions:
+  device_name: lizard-monitor
+  friendly_name: Lizard Monitor
+  relay_test: "false"
+  # Components from this checkout, not from GitHub, so an unpushed change
+  # to components/ is what gets compiled.
+  components_source: components
+
+packages:
+  base: !include packages/base.yaml
+  board: !include boards/xiao-esp32s3-lizard.yaml
+  sensors: !include packages/sensors.yaml
+  photoperiod: !include packages/photoperiod.yaml
+  lamps: !include packages/lamps.yaml
+  heat: !include packages/heat.yaml
+  alarms: !include packages/alarms.yaml
+  maintenance: !include packages/maintenance.yaml
+  history: !include packages/history.yaml
+  ble_link: !include packages/ble_link.yaml

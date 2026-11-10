@@ -1,0 +1,124 @@
+# BLE link, CONTROLLER side. The panel (packages/panel.yaml) is the client.
+#
+# Why BLE, not ESP-NOW or Wi-Fi. ESP-NOW rides the Wi-Fi station's channel:
+# when the router drops, the station scans channels to reconnect and the
+# link goes intermittent exactly when you most want the panel. BLE is
+# independent of the router, the internet and everything else. Same choice
+# tank-monitor made for its standalone 15 gal.
+#
+# READ-ONLY. The panel displays; it never sets anything. Every setting has
+# one home -- the controller's web page -- so there is no second copy of a
+# threshold to drift.
+#
+# FRAME, version 1. One comma-separated ASCII line, notified every 10 s.
+# The panel rejects any frame that is not EXACTLY 22 fields at version 1:
+# a truncated BLE read (MTU not negotiated) produces plausible garbage, and
+# a stale screen that admits it beats a fresh one that lies. -999 = unknown.
+#
+#   0  version (1)           11  alarm mask (active, packages/alarms.yaml bits)
+#   1  top degF              12  alarm mask (latched, unacknowledged)
+#   2  bottom degF           13  maintenance mask (bit 0 UVB, bit 1 recal)
+#   3  top %RH               14  clock ok 0/1
+#   4  bottom %RH            15  daytime 0/1 (inside the Day Light window)
+#   5  gradient degF         16  day target degF
+#   6  heat output %         17  heat cutoff degF
+#   7  heat relay 0/1        18  critical hot degF
+#   8  day light 0/1         19  cold warning degF
+#   9  UVB 0/1               20  cold critical degF
+#   10 severity 0/1/2        21  heat status code (packages/heat.yaml)
+#
+# The panel colours its numbers from fields 17-20 -- the controller's own
+# thresholds -- so changing one on the device page changes the panel too.
+#
+# Changing the frame means bumping the version here AND in packages/panel.yaml,
+# and flashing both boards.
+#
+# The panel needs this board's BLE MAC: read "Controller BLE MAC" on this
+# device's page after the first flash and put it in lizard-panel-remote.yaml.
+
+esp32_ble:
+  max_connections: 2
+
+esp32_ble_server:
+  max_clients: 1
+  manufacturer: "lizard-monitor"
+  model: "${device_name}"
+  services:
+    - uuid: "5a1e0001-6c69-7a61-7264-2d6d6f6e6974"
+      advertise: true
+      characteristics:
+        - id: tele_char
+          uuid: "5a1e0002-6c69-7a61-7264-2d6d6f6e6974"
+          read: true
+          notify: true
+          write: false
+          value: "0"
+
+globals:
+  - id: ble_tx
+    type: std::string
+    restore_value: false
+
+text_sensor:
+  # The MAC the panel has to be pointed at, from the running BLE stack. On
+  # the S3 the Bluetooth address is NOT the Wi-Fi MAC; deriving one from the
+  # other would be a guess that reads as a fact.
+  - platform: template
+    name: "Controller BLE MAC"
+    icon: "mdi:bluetooth"
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      using esphome::esp32_ble::global_ble;
+      if (global_ble == nullptr) return {"not started"};
+      uint8_t m[6];
+      global_ble->get_mac_msb_first(m);
+      if (m[0] == 0 && m[1] == 0 && m[2] == 0 && m[3] == 0 && m[4] == 0 && m[5] == 0)
+        return {"not started"};
+      char b[18];
+      snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+      return {std::string(b)};
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 10
+  - platform: template
+    name: "Panel Frame"
+    icon: "mdi:code-string"
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return {id(ble_tx)};'
+    web_server:
+      sorting_group_id: grp_panel
+      sorting_weight: 20
+
+interval:
+  - interval: 10s
+    startup_delay: 20s
+    then:
+      - lambda: |-
+          const auto num = [](float v) { return std::isnan(v) ? -999.0f : v; };
+          const uint32_t m = id(alarm_mask);
+          const int severity = (m & ${alarm_critical_mask}) ? 2 : (m ? 1 : 0);
+          char b[200];
+          snprintf(b, sizeof(b),
+                   "1,%.2f,%.2f,%.1f,%.1f,%.2f,%.0f,%d,%d,%d,%d,%u,%u,%u,%d,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%d",
+                   num(id(top_temp).state), num(id(bottom_temp).state),
+                   num(id(top_rh).state), num(id(bottom_rh).state),
+                   num(id(temp_gradient).state),
+                   id(heat_level) * 100.0f,
+                   id(heat_lamp_relay).state ? 1 : 0,
+                   id(led_relay).state ? 1 : 0,
+                   id(uvb_relay).state ? 1 : 0,
+                   severity,
+                   (unsigned) m, (unsigned) id(alarm_latched), (unsigned) id(maint_mask),
+                   id(clock_ok) ? 1 : 0,
+                   (id(clock_ok) && id(led_window)) ? 1 : 0,
+                   num(id(day_target_n).state), num(id(heat_cutoff_n).state),
+                   num(id(crit_hot_n).state), num(id(cold_warn_n).state), num(id(cold_crit_n).state),
+                   id(heat_code));
+          id(ble_tx) = b;
+      - ble_server.characteristic.set_value:
+          id: tele_char
+          value: !lambda 'return std::vector<uint8_t>(id(ble_tx).begin(), id(ble_tx).end());'
+      - ble_server.characteristic.notify:
+          id: tele_char

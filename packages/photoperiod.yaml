@@ -1,0 +1,299 @@
+# The day, from the sun, computed on the device.
+#
+# DAY LIGHT WINDOW. Civil dawn to civil dusk (sun above -6 degrees, the same
+# "civil, not sunrise/sunset" convention the tanks use) at the house, then
+# CLAMPED to [Min Day Length, Max Day Length] about solar noon. At 39.8 N
+# civil twilight runs ~10 h in December and ~15.5 h in June; the clamp keeps
+# the seasonal swing but trims the extremes. The window stays centred on
+# solar noon, so a clamped day is shortened (or lengthened) equally at both
+# ends.
+#
+# UVB WINDOW. Sun above UVB Elevation (+10 degrees by default), and never
+# outside the Day Light window. That gives a shorter window centred on
+# solar noon that follows the season: ~6.5 h in December, ~13 h in June. If
+# the sun never reaches UVB Elevation on a given day, there is no UVB that
+# day, and "UVB Window" says so.
+#
+# NO CLOCK, NO LIGHT. The XIAO has no RTC. Until SNTP has answered, nothing
+# here knows what time it is, so clock_ok stays false and packages/lamps.yaml
+# and packages/heat.yaml keep every lamp in Auto OFF, and packages/alarms.yaml
+# raises "clock not set". A gecko in the dark for a day is fine; a heat bulb
+# running all night on a guess is not.
+#
+# Every number below is a restore_value entity. The substitutions only seed
+# them on first boot.
+substitutions:
+  latitude: "39.8"
+  longitude: "-76.7"
+  led_elevation: "-6"
+  uvb_elevation: "10"
+  min_day_hours: "10"
+  max_day_hours: "14"
+
+sun:
+  id: sun_calc
+  time_id: sntp_time
+  # Seed only. on_boot and the Latitude / Longitude numbers set the live
+  # location with set_latitude() / set_longitude().
+  latitude: ${latitude}°
+  longitude: ${longitude}°
+
+globals:
+  # Written by the 15 s interval below; read by lamps, heat, alarms, panel.
+  - id: clock_ok
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: led_window
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: uvb_window
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Today's windows, epoch seconds. 0 = none.
+  - id: led_win_start
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: led_win_end
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: uvb_win_start
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: uvb_win_end
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  # Unclamped civil day length today, hours. NaN = could not compute.
+  - id: civil_day_hours
+    type: float
+    restore_value: false
+    initial_value: 'NAN'
+
+number:
+  - platform: template
+    name: "Latitude"
+    id: latitude_n
+    icon: "mdi:latitude"
+    unit_of_measurement: "°"
+    min_value: -90
+    max_value: 90
+    step: 0.01
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${latitude}
+    entity_category: config
+    on_value:
+      - lambda: 'id(sun_calc).set_latitude(x);'
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 60
+  - platform: template
+    name: "Longitude"
+    id: longitude_n
+    icon: "mdi:longitude"
+    unit_of_measurement: "°"
+    min_value: -180
+    max_value: 180
+    step: 0.01
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${longitude}
+    entity_category: config
+    on_value:
+      - lambda: 'id(sun_calc).set_longitude(x);'
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 61
+  - platform: template
+    name: "Day Light Sun Elevation"
+    id: led_elevation_n
+    icon: "mdi:weather-sunset-up"
+    unit_of_measurement: "°"
+    min_value: -12
+    max_value: 10
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${led_elevation}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 20
+  - platform: template
+    name: "UVB Sun Elevation"
+    id: uvb_elevation_n
+    icon: "mdi:weather-sunny"
+    unit_of_measurement: "°"
+    min_value: -6
+    max_value: 40
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${uvb_elevation}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 21
+  - platform: template
+    name: "Min Day Length"
+    id: min_day_n
+    icon: "mdi:arrow-collapse-horizontal"
+    unit_of_measurement: "h"
+    min_value: 6
+    max_value: 16
+    step: 0.25
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${min_day_hours}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 22
+  - platform: template
+    name: "Max Day Length"
+    id: max_day_n
+    icon: "mdi:arrow-expand-horizontal"
+    unit_of_measurement: "h"
+    min_value: 8
+    max_value: 18
+    step: 0.25
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${max_day_hours}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 23
+
+sensor:
+  - platform: sun
+    sun_id: sun_calc
+    name: "Sun Elevation"
+    type: elevation
+    update_interval: 60s
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 30
+
+text_sensor:
+  - platform: template
+    name: "Clock"
+    id: clock_text
+    icon: "mdi:clock-outline"
+    update_interval: 30s
+    lambda: |-
+      auto t = id(sntp_time).now();
+      if (!t.is_valid()) return {"NOT SET (no SNTP answer yet)"};
+      return t.strftime("%a %b %d %H:%M");
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 1
+  - platform: template
+    name: "Day Light Window"
+    id: led_window_text
+    icon: "mdi:weather-sunset"
+    update_interval: never
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 10
+  - platform: template
+    name: "UVB Window"
+    id: uvb_window_text
+    icon: "mdi:sun-wireless"
+    update_interval: never
+    web_server:
+      sorting_group_id: grp_schedule
+      sorting_weight: 11
+
+esphome:
+  on_boot:
+    priority: 200
+    then:
+      - lambda: |-
+          id(sun_calc).set_latitude(id(latitude_n).state);
+          id(sun_calc).set_longitude(id(longitude_n).state);
+
+interval:
+  - interval: 15s
+    then:
+      - lambda: |-
+          auto now = id(sntp_time).now();
+          if (!now.is_valid()) {
+            if (id(clock_ok)) ESP_LOGW("photoperiod", "Clock lost: lamps in Auto go off");
+            id(clock_ok) = false;
+            id(led_window) = false;
+            id(uvb_window) = false;
+            id(led_window_text).publish_state("unknown: clock not set");
+            id(uvb_window_text).publish_state("unknown: clock not set");
+            return;
+          }
+          id(clock_ok) = true;
+          const uint32_t ts = now.timestamp;
+
+          // Today's events, for the LOCAL date. Sun::sunrise(date, elev)
+          // takes a UTC date at 00:00 and returns that date's event; build
+          // it from local noon so the date is the local one.
+          const uint32_t local_noon = ts - (now.hour * 3600 + now.minute * 60 + now.second) + 12 * 3600;
+          ESPTime day = ESPTime::from_epoch_utc(local_noon);
+          day.hour = 0; day.minute = 0; day.second = 0;
+          day.recalc_timestamp_utc();
+
+          auto dawn = id(sun_calc).sunrise(day, id(led_elevation_n).state);
+          auto dusk = id(sun_calc).sunset(day, id(led_elevation_n).state);
+          uint32_t start = 0, end = 0;
+          char buf[96];
+          if (dawn.has_value() && dusk.has_value() && dusk->timestamp > dawn->timestamp) {
+            const float civil_h = (dusk->timestamp - dawn->timestamp) / 3600.0f;
+            id(civil_day_hours) = civil_h;
+            float lo = id(min_day_n).state, hi = id(max_day_n).state;
+            if (hi < lo) hi = lo;  // a contradictory pair: min wins (more light, never less)
+            float len_h = civil_h < lo ? lo : (civil_h > hi ? hi : civil_h);
+            const uint32_t noon = (dawn->timestamp + dusk->timestamp) / 2;
+            start = noon - (uint32_t) (len_h * 1800.0f);
+            end = noon + (uint32_t) (len_h * 1800.0f);
+            const auto s = ESPTime::from_epoch_local(start), e = ESPTime::from_epoch_local(end);
+            const char *note = civil_h < lo ? ", stretched to min" : (civil_h > hi ? ", trimmed to max" : "");
+            snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d (%.1f h; sun %.1f h%s)",
+                     s.hour, s.minute, e.hour, e.minute, len_h, civil_h, note);
+          } else {
+            // Cannot happen at a temperate latitude with a sane elevation;
+            // if it does, no window -- lamps off, not on.
+            id(civil_day_hours) = NAN;
+            snprintf(buf, sizeof(buf), "none today (sun never crosses %.1f°)", id(led_elevation_n).state);
+          }
+          id(led_win_start) = start;
+          id(led_win_end) = end;
+          id(led_window) = start != 0 && ts >= start && ts < end;
+          if (id(led_window_text).state != buf) id(led_window_text).publish_state(buf);
+
+          auto urise = id(sun_calc).sunrise(day, id(uvb_elevation_n).state);
+          auto uset = id(sun_calc).sunset(day, id(uvb_elevation_n).state);
+          uint32_t us = 0, ue = 0;
+          if (start != 0 && urise.has_value() && uset.has_value()) {
+            us = std::max<uint32_t>(urise->timestamp, start);
+            ue = std::min<uint32_t>(uset->timestamp, end);
+            if (ue <= us) { us = 0; ue = 0; }
+          }
+          if (us != 0) {
+            const auto s = ESPTime::from_epoch_local(us), e = ESPTime::from_epoch_local(ue);
+            snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d (%.1f h)", s.hour, s.minute, e.hour, e.minute,
+                     (ue - us) / 3600.0f);
+          } else {
+            snprintf(buf, sizeof(buf), "none today (sun stays below %.1f°)", id(uvb_elevation_n).state);
+          }
+          id(uvb_win_start) = us;
+          id(uvb_win_end) = ue;
+          id(uvb_window) = us != 0 && ts >= us && ts < ue;
+          if (id(uvb_window_text).state != buf) id(uvb_window_text).publish_state(buf);

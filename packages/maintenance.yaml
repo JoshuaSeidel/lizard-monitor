@@ -1,0 +1,211 @@
+# Things that wear out or drift, and the device's prompts to deal with them.
+#
+# UVB. Nothing on this device measures UVB, and nothing pretends to: hobby
+# "UV" sensors (LTR390 and similar) read UVA or a UVI-ish proxy, not the
+# UVB a T5 tube loses as it ages. What IS real is how long the tube has run.
+# "UVB Lamp Hours" counts relay-on time (restored, saved every 10 min) and
+# "UVB Replace After" says when to change it. The default, 4400 h, is the
+# usual 12-month T5 schedule at ~12 h a day; use your tube's own figure.
+# Press "UVB Lamp Replaced" when you fit a new one.
+#
+# SENSORS. SHT45s drift slowly, faster in a humid enclosure. Every "Sensor
+# Recalibration Interval" days the device asks for a check against a
+# reference (the 75 % RH salt test, or a trusted hygrometer and
+# thermometer next to the sensors). Set any offsets in Sensor Calibration,
+# then press "Sensors Calibrated".
+#
+# Due items show in "Maintenance Due" and on the panel. They are reminders,
+# not alarms: they do not latch and do not turn the panel amber.
+substitutions:
+  uvb_replace_hours: "4400"
+  recal_days: "90"
+
+globals:
+  - id: uvb_minutes
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # Minutes counted since the last save to flash. A planned reboot saves
+  # them (on_shutdown below); a power cut loses under 10 minutes.
+  - id: uvb_pending_min
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: uvb_installed_at
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  - id: sensors_calibrated_at
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # First time this build saw a valid clock. A never-calibrated sensor pair
+  # is counted from here, so a new build does not nag on day one -- and
+  # "Sensors Last Calibrated" still honestly says "never".
+  - id: maint_first_seen
+    type: uint32_t
+    restore_value: true
+    initial_value: '0'
+  # Bit 0 UVB due, bit 1 sensor recalibration due. Read by alarms/panel.
+  - id: maint_mask
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+number:
+  - platform: template
+    name: "UVB Replace After"
+    id: uvb_replace_n
+    icon: "mdi:calendar-clock"
+    unit_of_measurement: "h"
+    min_value: 500
+    max_value: 20000
+    step: 100
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${uvb_replace_hours}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_maintenance
+      sorting_weight: 11
+  - platform: template
+    name: "Sensor Recalibration Interval"
+    id: recal_days_n
+    icon: "mdi:calendar-sync"
+    unit_of_measurement: "d"
+    min_value: 7
+    max_value: 365
+    step: 1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${recal_days}
+    entity_category: config
+    web_server:
+      sorting_group_id: grp_maintenance
+      sorting_weight: 21
+
+sensor:
+  - platform: template
+    name: "UVB Lamp Hours"
+    id: uvb_hours
+    icon: "mdi:timer-outline"
+    unit_of_measurement: "h"
+    state_class: total_increasing
+    accuracy_decimals: 1
+    update_interval: 60s
+    lambda: 'return (id(uvb_minutes) + id(uvb_pending_min)) / 60.0f;'
+    web_server:
+      sorting_group_id: grp_maintenance
+      sorting_weight: 10
+
+text_sensor:
+  - platform: template
+    name: "UVB Lamp Installed"
+    id: uvb_installed_text
+    icon: "mdi:calendar-check"
+    update_interval: 300s
+    lambda: |-
+      if (id(uvb_installed_at) == 0) return {"not recorded: press UVB Lamp Replaced when you fit one"};
+      return ESPTime::from_epoch_local(id(uvb_installed_at)).strftime("%Y-%m-%d");
+    web_server:
+      sorting_group_id: grp_maintenance
+      sorting_weight: 12
+  - platform: template
+    name: "Sensors Last Calibrated"
+    id: calibrated_text
+    icon: "mdi:calendar-check"
+    update_interval: 300s
+    lambda: |-
+      if (id(sensors_calibrated_at) == 0) return {"never: check against a reference"};
+      return ESPTime::from_epoch_local(id(sensors_calibrated_at)).strftime("%Y-%m-%d");
+    web_server:
+      sorting_group_id: grp_maintenance
+      sorting_weight: 22
+  - platform: template
+    name: "Maintenance Due"
+    id: maint_text
+    icon: "mdi:wrench-clock"
+    update_interval: never
+    web_server:
+      sorting_group_id: grp_alarms
+      sorting_weight: 40
+
+button:
+  - platform: template
+    name: "UVB Lamp Replaced"
+    icon: "mdi:lightbulb-on-outline"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          ESP_LOGI("maint", "UVB lamp replaced after %.0f h", (id(uvb_minutes) + id(uvb_pending_min)) / 60.0f);
+          id(uvb_minutes) = 0;
+          id(uvb_pending_min) = 0;
+          auto t = id(sntp_time).now();
+          id(uvb_installed_at) = t.is_valid() ? (uint32_t) t.timestamp : 0;
+          id(uvb_installed_text).update();
+          id(uvb_hours).update();
+    web_server:
+      sorting_group_id: grp_maintenance
+      sorting_weight: 13
+  - platform: template
+    name: "Sensors Calibrated"
+    icon: "mdi:check-decagram"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          auto t = id(sntp_time).now();
+          if (!t.is_valid()) {
+            ESP_LOGW("maint", "Sensors Calibrated ignored: the clock is not set, so there is no date to record");
+            return;
+          }
+          id(sensors_calibrated_at) = t.timestamp;
+          ESP_LOGI("maint", "Sensor calibration recorded");
+          id(calibrated_text).update();
+    web_server:
+      sorting_group_id: grp_maintenance
+      sorting_weight: 23
+
+esphome:
+  on_shutdown:
+    then:
+      - lambda: |-
+          id(uvb_minutes) += id(uvb_pending_min);
+          id(uvb_pending_min) = 0;
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          if (id(uvb_relay).state) id(uvb_pending_min)++;
+          if (id(uvb_pending_min) >= 10) {
+            id(uvb_minutes) += id(uvb_pending_min);
+            id(uvb_pending_min) = 0;
+          }
+
+          uint32_t mask = 0;
+          std::string due;
+          const float uvb_h = (id(uvb_minutes) + id(uvb_pending_min)) / 60.0f;
+          if (uvb_h >= id(uvb_replace_n).state) {
+            mask |= 1;
+            char b[64];
+            snprintf(b, sizeof(b), "replace UVB lamp (%.0f of %.0f h)", uvb_h, id(uvb_replace_n).state);
+            due += b;
+          }
+          auto now = id(sntp_time).now();
+          if (now.is_valid()) {
+            if (id(maint_first_seen) == 0) id(maint_first_seen) = now.timestamp;
+            const uint32_t since = id(sensors_calibrated_at) != 0 ? id(sensors_calibrated_at) : id(maint_first_seen);
+            const float days = (now.timestamp - since) / 86400.0f;
+            if (days >= id(recal_days_n).state) {
+              mask |= 2;
+              char b[64];
+              snprintf(b, sizeof(b), "check sensors against a reference (%.0f days)", days);
+              if (!due.empty()) due += "; ";
+              due += b;
+            }
+          }
+          id(maint_mask) = mask;
+          if (due.empty()) due = "nothing due";
+          if (id(maint_text).state != due) id(maint_text).publish_state(due);

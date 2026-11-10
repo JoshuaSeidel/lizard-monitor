@@ -1,0 +1,232 @@
+# Two SHT45s -- TOP (upper zone, under the lamps) and BOTTOM (coolest air,
+# where humidity pools) -- each on its own I2C bus from the board file.
+#
+# WHAT THESE MEASURE (metrologist's note). An SHT45 measures the air at its
+# own die. The top sensor sits near a LIGHT-EMITTING heat bulb, and anything
+# in the bulb's beam is heated by radiation as well as by the air, so it
+# reads high -- and the heat loop would back off early. Mount the top sensor
+# OUT OF THE BEAM and shaded (on a side wall at upper-branch height, a few
+# inches below the mesh, not under the bulb). It then reads upper-zone AIR,
+# which is what the heat loop holds to the Day Target. It does NOT read the
+# basking surface; check that with an IR thermometer.
+#
+# Get the PTFE-membrane-capped SHT45 variant: this enclosure is misted
+# daily, and liquid water on the die pins RH at 100 %. components/sht_guard
+# runs the SHT4x's on-chip heater only when that is happening.
+#
+# Fahrenheit from the first filter onward, so even the SHT4x's own debug log
+# lines are in degF. Nothing user-facing in this project is Celsius.
+#
+# Everything downstream (heat loop, alarms, panel, history) reads the
+# GUARDED outputs: top_temp, top_rh, bottom_temp, bottom_rh. They go NaN
+# (unknown) on a fault -- see components/sht_guard.
+substitutions:
+  # First-boot calibration offsets. The numbers below are the live values;
+  # these only seed them. Set them from a reference check (Maintenance).
+  top_temp_offset: "0.0"
+  top_rh_offset: "0.0"
+  bottom_temp_offset: "0.0"
+  bottom_rh_offset: "0.0"
+
+external_components:
+  - source: ${components_source}
+    components: [sht_guard]
+    refresh: 0s
+
+sensor:
+  # ---- raw, internal: only the guards read these ----
+  - platform: sht4x
+    i2c_id: i2c_top
+    address: 0x44
+    update_interval: 10s
+    precision: High
+    # ESPHome's timed heater stays OFF: it would fire whatever the humidity
+    # and bias the temperature. sht_guard fires it only on condensation.
+    heater_max_duty: 0.0
+    temperature:
+      id: top_temp_raw
+      internal: true
+      unit_of_measurement: "°F"
+      accuracy_decimals: 2
+      filters:
+        - lambda: 'return x * 1.8f + 32.0f;'
+    humidity:
+      id: top_rh_raw
+      internal: true
+      accuracy_decimals: 1
+
+  - platform: sht4x
+    i2c_id: i2c_bottom
+    address: 0x44
+    update_interval: 10s
+    precision: High
+    heater_max_duty: 0.0
+    temperature:
+      id: bottom_temp_raw
+      internal: true
+      unit_of_measurement: "°F"
+      accuracy_decimals: 2
+      filters:
+        - lambda: 'return x * 1.8f + 32.0f;'
+    humidity:
+      id: bottom_rh_raw
+      internal: true
+      accuracy_decimals: 1
+
+  # Top minus bottom. The gradient is what lets the gecko choose: a
+  # gradient near zero means the enclosure is one temperature throughout.
+  - platform: template
+    name: "Temperature Gradient"
+    id: temp_gradient
+    icon: "mdi:arrow-up-down"
+    unit_of_measurement: "°F"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      if (!id(top_guard).is_fresh() || !id(bottom_guard).is_fresh()) return NAN;
+      return id(top_temp).state - id(bottom_temp).state;
+    web_server:
+      sorting_group_id: grp_status
+      sorting_weight: 30
+
+# ---- the guarded readings everything else uses ----
+sht_guard:
+  - id: top_guard
+    i2c_id: i2c_top
+    address: 0x44
+    raw_temperature: top_temp_raw
+    raw_humidity: top_rh_raw
+    temperature:
+      name: "Top Temperature"
+      id: top_temp
+      web_server:
+        sorting_group_id: grp_status
+        sorting_weight: 10
+    humidity:
+      name: "Top Humidity"
+      id: top_rh
+      web_server:
+        sorting_group_id: grp_status
+        sorting_weight: 40
+    status:
+      name: "Top Sensor"
+      id: top_sensor_status
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: grp_calibration
+        sorting_weight: 1
+
+  - id: bottom_guard
+    i2c_id: i2c_bottom
+    address: 0x44
+    raw_temperature: bottom_temp_raw
+    raw_humidity: bottom_rh_raw
+    temperature:
+      name: "Bottom Temperature"
+      id: bottom_temp
+      web_server:
+        sorting_group_id: grp_status
+        sorting_weight: 20
+    humidity:
+      name: "Bottom Humidity"
+      id: bottom_rh
+      web_server:
+        sorting_group_id: grp_status
+        sorting_weight: 50
+    status:
+      name: "Bottom Sensor"
+      id: bottom_sensor_status
+      entity_category: diagnostic
+      web_server:
+        sorting_group_id: grp_calibration
+        sorting_weight: 2
+
+# Calibration offsets, added on the device before anything reads the value.
+# Check against a reference (the 75 % RH salt test, a trusted hygrometer,
+# a reference thermometer next to the sensor), then set the difference here
+# and press "Sensors Calibrated" (Maintenance).
+number:
+  - platform: template
+    name: "Top Temperature Offset"
+    id: top_temp_offset_n
+    icon: "mdi:thermometer-plus"
+    unit_of_measurement: "°F"
+    min_value: -5.0
+    max_value: 5.0
+    step: 0.1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${top_temp_offset}
+    entity_category: config
+    on_value:
+      - lambda: 'id(top_guard).set_offsets(id(top_temp_offset_n).state, id(top_rh_offset_n).state);'
+    web_server:
+      sorting_group_id: grp_calibration
+      sorting_weight: 10
+  - platform: template
+    name: "Top Humidity Offset"
+    id: top_rh_offset_n
+    icon: "mdi:water-plus"
+    unit_of_measurement: "%"
+    min_value: -15.0
+    max_value: 15.0
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${top_rh_offset}
+    entity_category: config
+    on_value:
+      - lambda: 'id(top_guard).set_offsets(id(top_temp_offset_n).state, id(top_rh_offset_n).state);'
+    web_server:
+      sorting_group_id: grp_calibration
+      sorting_weight: 11
+  - platform: template
+    name: "Bottom Temperature Offset"
+    id: bottom_temp_offset_n
+    icon: "mdi:thermometer-plus"
+    unit_of_measurement: "°F"
+    min_value: -5.0
+    max_value: 5.0
+    step: 0.1
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${bottom_temp_offset}
+    entity_category: config
+    on_value:
+      - lambda: 'id(bottom_guard).set_offsets(id(bottom_temp_offset_n).state, id(bottom_rh_offset_n).state);'
+    web_server:
+      sorting_group_id: grp_calibration
+      sorting_weight: 12
+  - platform: template
+    name: "Bottom Humidity Offset"
+    id: bottom_rh_offset_n
+    icon: "mdi:water-plus"
+    unit_of_measurement: "%"
+    min_value: -15.0
+    max_value: 15.0
+    step: 0.5
+    mode: box
+    optimistic: true
+    restore_value: true
+    initial_value: ${bottom_rh_offset}
+    entity_category: config
+    on_value:
+      - lambda: 'id(bottom_guard).set_offsets(id(bottom_temp_offset_n).state, id(bottom_rh_offset_n).state);'
+    web_server:
+      sorting_group_id: grp_calibration
+      sorting_weight: 13
+
+esphome:
+  on_boot:
+    # After the numbers have restored (priority 600), before the first
+    # sample (sensors start updating at -100 and later).
+    priority: 200
+    then:
+      - lambda: |-
+          id(top_guard).set_offsets(id(top_temp_offset_n).state, id(top_rh_offset_n).state);
+          id(bottom_guard).set_offsets(id(bottom_temp_offset_n).state, id(bottom_rh_offset_n).state);
