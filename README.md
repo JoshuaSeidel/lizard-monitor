@@ -148,14 +148,16 @@ The panel is read-only, and colours come from the controller's own thresholds.
 
 ## Parts
 
-| Part | Notes | Where |
-|---|---|---|
-| Seeed XIAO ESP32-S3 | Controller. **In stock** at Seeed, $7.49 (checked 2026-11-10) | [Seeed](https://www.seeedstudio.com/XIAO-ESP32S3-p-5627.html) |
-| CZH-Labs 4-channel IoT relay outlet module | 10 A per outlet, 15 A total, optocoupled 3–120 V DC inputs. Sold now as **D-1703TL** (CLAUDE.md calls it D-1585TL). **In stock**, $93.60 (checked 2026-11-10). **Set every channel's DIP switch to "Normally OFF"** (see Wiring) | [CZH-Labs](https://czh-labs.com/products/ac-power-4-channel-iot-relay-outlet-module-din-rail-or-screw-mounting-support-normally-off-normally-on-always-off-always-on) · [Amazon search](https://www.amazon.com/s?k=CZH-Labs+4+channel+IoT+relay+outlet+module) |
-| 2 × Adafruit SHT45 **with PTFE membrane** (product 6174) | IP67 membrane, because the enclosure is misted daily. Both at 0x44, one per I2C bus. **Out of stock at Adafruit on 2026-11-10**; check again, or a distributor | [Adafruit](https://www.adafruit.com/product/6174) · [Amazon search](https://www.amazon.com/s?k=Adafruit+SHT45+PTFE) |
-| 2 × STEMMA QT / Qwiic to female-socket cable, long enough to reach each sensor | Avoids soldering at the sensor end. Never hand-splice an address pin | [Amazon search](https://www.amazon.com/s?k=STEMMA+QT+to+female+socket+cable) |
-| LAFVIN ESP32-C6 1.47" LCD board | Panel. Already owned (it ran tank-monitor before) | — |
-| 2 × USB-C 5 V supplies | One per board | — |
+| Part | Qty | Notes | Where |
+|---|---|---|---|
+| Seeed XIAO ESP32-S3 | 1 | Controller. **In stock**, $7.49 (checked 2026-11-11) | [Seeed](https://www.seeedstudio.com/XIAO-ESP32S3-p-5627.html) |
+| CZH-Labs 4-channel IoT relay outlet module | 1 | Skip if you already have the D-1585TL. 10 A per outlet, 15 A total, optocoupled 3–120 V DC inputs (a GPIO drives them directly). Sold now as **D-1703TL**. **In stock**, $93.60 (checked 2026-11-10). **Set every channel's DIP switch to "Normally OFF"** | [CZH-Labs](https://czh-labs.com/products/ac-power-4-channel-iot-relay-outlet-module-din-rail-or-screw-mounting-support-normally-off-normally-on-always-off-always-on) · [Amazon search](https://www.amazon.com/s?k=CZH-Labs+4+channel+IoT+relay+outlet+module) |
+| Adafruit SHT45 **with PTFE membrane** (product 6174) | 2 | IP67 membrane, needed because the enclosure is misted daily. Both at 0x44, one per I2C bus. $13.50. **Out of stock at Adafruit on 2026-11-11**: use "notify me" there, or a distributor. The non-PTFE version (5665) is in stock but has no membrane, so mist reaches the die | [Adafruit](https://www.adafruit.com/product/6174) · [Amazon search](https://www.amazon.com/s?k=Adafruit+SHT45+PTFE) |
+| SparkFun Qwiic Adapter | 2 | JST sockets plus 0.1" holes. Solder one per bus to the XIAO pads with short wires, inside the dry controller box, so nothing is soldered in the enclosure. $1.60, **in stock** | [SparkFun](https://www.sparkfun.com/products/14495) |
+| SparkFun Flexible Qwiic Cable, 500 mm | 2 | Adapter → sensor. Silicone, flexible. $2.75, **in stock**. Measure first: if the controller box is far from the enclosure, the bottom sensor may need longer (I2C at 100 kHz is fine to ~1 m with the breakouts' pull-ups) | [SparkFun](https://www.sparkfun.com/products/14429) |
+| Hookup wire, 22–26 AWG, a few colours | — | XIAO → Qwiic adapters, and XIAO → relay IN+ ×3 / IN− | — |
+| USB-C 5 V supply + cable | 2 | One for each board | — |
+| LAFVIN ESP32-C6 1.47" LCD board | — | Panel. Already owned | — |
 
 ## Wiring (controller)
 
